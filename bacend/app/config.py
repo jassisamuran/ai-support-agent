@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     SYNC_DATABASE_URL: str
     REDIS_URL: str = "redis://localhost:6379"
 
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    JWT_ALGORITHM: str = "HS256"
+
     class Config:
         env_file = ".env"
         case_sensitive = True
