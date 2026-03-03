@@ -1,0 +1,47 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Environment variables
+.env
+.env.*
+
+# IDE files
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# SQLite database (if used)
+*.db
+*.sqlite3
+
+# pytest
+.pytest_cache/
+
+# Coverage
+.coverage
+htmlcov/
+
+# MacOS
+.DS_Store
+
+# Windows
+Thumbs.db
+
+
+# LLM related
+vector_store/
+embeddings/
+chroma/
+faiss_index/
+
+# Model cache
+.cache/
