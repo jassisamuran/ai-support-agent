@@ -45,3 +45,8 @@ faiss_index/
 
 # Model cache
 .cache/
+
+# Docker
+*.pid
+*.seed
+*.swp
