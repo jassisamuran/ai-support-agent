@@ -1,5 +1,7 @@
 from contextlib import asynccontextmanager
 
+import app.models
+from app.api.v1 import auth, chat
 from app.config import settings
 from app.database import Base, engine
 from fastapi import FastAPI
@@ -25,6 +27,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["Auth"])
+app.include_router(chat.router, prefix="/api/v1/chat", tags=["chat"])
 
 
 @app.get("/health")
