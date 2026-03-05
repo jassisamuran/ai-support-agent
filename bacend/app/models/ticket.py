@@ -27,14 +27,14 @@ class Ticket(Base):
     __tablename__ = "tickets"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    user_id = Column(UUID(as_uuid=True), ForeignKey="user.id", nullable=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     conversation_id = Column(
-        UUID(as_uuid=True), ForeignKey("conversation.id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=True
     )
-    title = Column(String, nullable=True)
+    title = Column(String, nullable=False)
     description = Column(Text)
     status = Column(Enum(TicketStatus), default=TicketStatus.OPEN)
-    priority = Column(Enum(TicketPriority), default=TicketPriority.HIGH)
+    priority = Column(Enum(TicketPriority), default=TicketPriority.MEDIUM)
     assigned_to = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     resolved_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(

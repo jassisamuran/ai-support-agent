@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 oauth2_schema = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
-pwd_content = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_content = CryptContext(schemes=["argon2"], deprecated="auto")
 
 
 def hash_password(password: str) -> str:
@@ -19,7 +19,7 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_content.verify(plain, hash)
+    return pwd_content.verify(plain, hashed)
 
 
 def create_access_token(data: dict) -> str:
@@ -34,7 +34,7 @@ async def get_current_user(
     token: str = Depends(oauth2_schema), db: AsyncSession = Depends(get_db)
 ) -> User:
     error = HTTPException(
-        status_code=status.HTTP_401.UNAUTHORIZED,
+        status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid or expired token",
     )
     try:

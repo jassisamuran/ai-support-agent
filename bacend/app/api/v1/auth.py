@@ -1,10 +1,9 @@
 from app.database import get_db
 from app.middleware.auth import create_access_token, hash_password, verify_password
+from app.models.organization import Organization
+from app.models.user import User
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
-from middleware.auth import verify_password
-from models.organization import Organization
-from models.user import User
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,14 +12,14 @@ router = APIRouter()
 
 
 class RegisterRequest(BaseModel):
-    emai: str
+    email: str
     name: str
     password: str
     org_name: str
     org_slug: str
 
 
-@router.post("/register", status=201)
+@router.post("/register", status_code=201)
 async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
     result = await db.execute(
