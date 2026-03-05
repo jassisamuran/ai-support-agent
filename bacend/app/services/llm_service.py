@@ -214,4 +214,4 @@ class LLMService:
         }
 
 
-llm = LLMService()
+llm_service = LLMService()

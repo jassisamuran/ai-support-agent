@@ -12,8 +12,15 @@ class Settings(BaseSettings):
 
     DATABASE_URL: str
     SYNC_DATABASE_URL: str
+    CB_FAILURE_THRESHOLD: int
+    CB_RECOVERY_TIMEOUT: int
+    GPT4O_MINI_INPUT_COST_PER_1M: int
+    OPENAI_MODEL: str
+    GPT4O_MINI_OUTPUT_COST_PER_1M: int
+    ANTHROPIC_MODEL: str
     REDIS_URL: str = "redis://localhost:6379"
-
+    OPENAI_API_KEYS: str
+    ANTHROPIC_API_KEY: str
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     JWT_ALGORITHM: str = "HS256"
 
