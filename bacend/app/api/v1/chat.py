@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
+from app.core.agent import enterprise_agent
 from app.database import get_db
 from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import check_rate_limit
@@ -89,36 +90,45 @@ async def send_message(
             request, conversation, history, current_user, org, db
         )
 
-    messages = [
-        {
-            "role": "system",
-            "content": org.system_prompt or "You are helpful customer support agent.",
-        },
-        *history,
-        {"role": "user", "content": request.message},
-    ]
-
-    try:
-        llm_result = await llm_service.complete(messages=messages)
-    except Exception:
-        llm_result = {
-            "response": "Sorry, AI service is temporarily unavailable.",
-            "tokens_used": 0,
-            "tool_calls": [],
-            "cost_usd": 0.0,
-            "from_cache": False,
-        }
-
-    response_text = (
-        llm_result["message"].content
-        if llm_result and llm_result.get("message")
-        else "Sorry, I couldn't generate a response."
+    result = await enterprise_agent.run(
+        user_message=request.message,
+        conversation_history=history,
+        user_id=str(current_user.id),
+        conversation_id=str(conversation.id),
+        org=org,
+        db=db,
     )
 
-    tokens_used = llm_result.get("total_tokens", 0)
-    tool_calls = llm_result.get("tool_calls", [])
-    from_cache = llm_result.get("from_cache", False)
-    cost_usd = llm_result.get("cost_usd", 0.0)
+    # messages = [
+    #     {
+    #         "role": "system",
+    #         "content": org.system_prompt or "You are helpful customer support agent.",
+    #     },
+    #     *history,
+    #     {"role": "user", "content": request.message},
+    # ]
+
+    # try:
+    #     llm_result = await llm_service.complete(messages=messages)
+    # except Exception:
+    #     llm_result = {
+    #         "response": "Sorry, AI service is temporarily unavailable.",
+    #         "tokens_used": 0,
+    #         "tool_calls": [],
+    #         "cost_usd": 0.0,
+    #         "from_cache": False,
+    #     }
+
+    # response_text = (
+    #     llm_result["message"].content
+    #     if llm_result and llm_result.get("message")
+    #     else "Sorry, I couldn't generate a response."
+    # )
+
+    # tokens_used = llm_result.get("total_tokens", 0)
+    # tool_calls = llm_result.get("tool_calls", [])
+    # from_cache = llm_result.get("from_cache", False)
+    # cost_usd = llm_result.get("cost_usd", 0.0)
     db.add(
         Message(
             org_id=org.id,
@@ -127,16 +137,15 @@ async def send_message(
             content=request.message,
         )
     )
-
     db.add(
         Message(
             org_id=org.id,
             conversation_id=conversation.id,
             role=MessageRole.ASSISTANT,
-            content=response_text,
-            tokens_used=tokens_used,
-            tool_calls=tool_calls,
-            from_cache=from_cache,
+            content=result["response"],
+            tokens_used=result["tokens_used"],
+            tool_calls=result["tool_calls"],
+            from_cache=result["from_cache"],
         )
     )
 
@@ -144,11 +153,11 @@ async def send_message(
 
     return ChatResponse(
         conversation_id=str(conversation.id),
-        message=response_text,
-        tool_calls_made=[tc["name"] for tc in tool_calls] if tool_calls else [],
-        tokens_used=tokens_used,
-        cost_usd=cost_usd,
-        from_cache=from_cache,
+        message=result["response"],
+        tool_calls_made=[tc["name"] for tc in result["tool_calls"]],
+        tokens_used=result["tokens_used"],
+        cost_usd=result["cost_usd"],
+        from_cache=result["from_cache"],
     )
 
 
