@@ -1,4 +1,3 @@
-import asyncio
 import json
 from datetime import datetime
 from typing import List, Optional
@@ -11,7 +10,7 @@ from app.middleware.tenant import get_current_org
 from app.models.conversation import Conversation, Message, MessageRole
 from app.models.organization import Organization
 from app.models.user import User
-from app.services.webhook_service import fire_event
+from app.services.llm_service import llm_service
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -32,7 +31,7 @@ class ChatResponse(BaseModel):
     conversation_id: str
     message: str
     tool_calls_made: List[str] = []
-    tokens_use: int
+    tokens_used: int
     cost_usd: float
     from_cache: bool
     created_at: datetime = Field(default_factory=datetime.utcnow)
@@ -48,7 +47,7 @@ async def send_message(
     await check_rate_limit(str(current_user.id))
 
     if request.conversation_id:
-        result = await db.execute(
+        db_result = await db.execute(
             select(Conversation).where(
                 Conversation.id == request.conversation_id,
                 Conversation.org_id == org.id,
@@ -56,7 +55,7 @@ async def send_message(
             )
         )
 
-        conversation = result.scalar_one_or_none()
+        conversation = db_result.scalar_one_or_none()
 
         if not conversation:
             raise HTTPException(status_code=404, detail="Conversation not found")
@@ -70,32 +69,55 @@ async def send_message(
         db.add(conversation)
         await db.flush()
 
-        # asyncio.create_task(
-        #     fire_event(
-        #         "conversation.started",
-        #         {"conversation_id": str(conversation.id), "channel": request.channel},
-        #         str(org.id),
-        #     )
-        # )
-
-    result = await db.execute(
+    db_result = await db.execute(
         select(Message)
         .where(Message.conversation_id == conversation.id)
         .order_by(Message.created_at.desc())
         .limit(20)
     )
 
-    past_messages = list(reversed(result.scalars().all()))
+    past_messages = list(reversed(db_result.scalars().all()))
 
     history = [
         {"role": msg.role.value, "content": msg.content}
         for msg in past_messages
         if msg.role in (MessageRole.USER, MessageRole.ASSISTANT)
     ]
-
     if request.stream:
-        return await _stream_response(request, history, current_user, org, db)
+        return await _stream_response(
+            request, conversation, history, current_user, org, db
+        )
 
+    messages = [
+        {
+            "role": "system",
+            "content": org.system_prompt or "You are helpful customer support agent.",
+        },
+        *history,
+        {"role": "user", "content": request.message},
+    ]
+
+    try:
+        llm_result = await llm_service.complete(messages=messages)
+    except Exception:
+        llm_result = {
+            "response": "Sorry, AI service is temporarily unavailable.",
+            "tokens_used": 0,
+            "tool_calls": [],
+            "cost_usd": 0.0,
+            "from_cache": False,
+        }
+
+    response_text = (
+        llm_result["message"].content
+        if llm_result and llm_result.get("message")
+        else "Sorry, I couldn't generate a response."
+    )
+
+    tokens_used = llm_result.get("total_tokens", 0)
+    tool_calls = llm_result.get("tool_calls", [])
+    from_cache = llm_result.get("from_cache", False)
+    cost_usd = llm_result.get("cost_usd", 0.0)
     db.add(
         Message(
             org_id=org.id,
@@ -110,10 +132,10 @@ async def send_message(
             org_id=org.id,
             conversation_id=conversation.id,
             role=MessageRole.ASSISTANT,
-            content=result["response"],
-            tokens_used=result["tokens_used"],
-            tool_calls=result["tool_calls"],
-            from_cache=result["from_cache"],
+            content=response_text,
+            tokens_used=tokens_used,
+            tool_calls=tool_calls,
+            from_cache=from_cache,
         )
     )
 
@@ -121,11 +143,11 @@ async def send_message(
 
     return ChatResponse(
         conversation_id=str(conversation.id),
-        message=result["response"],
-        tool_calls_made=[tc["name"] for tc in result["tool_calls"]],
-        tokens_used=result["tokens_used"],
-        cost_usd=result["cost_usd"],
-        from_cache=result["from_cache"],
+        message=response_text,
+        tool_calls_made=[tc["name"] for tc in tool_calls] if tool_calls else [],
+        tokens_used=tokens_used,
+        cost_usd=cost_usd,
+        from_cache=from_cache,
     )
 
 
@@ -147,8 +169,8 @@ async def _stream_response(request, conversation, history, current_user, org, db
             "role": "system",
             "content": org_fresh.system_prompt
             or "You are helpful customer support agent.",
-        }
-        * history,
+        },
+        *history,
         {"role": "user", "content": request.message},
     ]
 
@@ -162,7 +184,7 @@ async def _stream_response(request, conversation, history, current_user, org, db
                 delta = chunk.choices[0].delta
                 if delta.content:
                     full_response += delta.content
-                    yield f"data: {json.dumps({'tokens': delta.content})}\n\n"
+                    yield f"data: {json.dumps({'token': delta.content})}\n\n"
 
             db.add(
                 Message(
