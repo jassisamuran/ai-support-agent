@@ -6,9 +6,9 @@ redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
 async def check_rate_limit(user_id: str):
+    """rate limiting for user"""
     key = f"rl:{user_id}"
-
-    count = await redis.incr(key)
+    count = await redis.get(key)
 
     if count == 1:
         await redis.expire(key, 60)
