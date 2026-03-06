@@ -83,6 +83,7 @@ async def send_message(
         for msg in past_messages
         if msg.role in (MessageRole.USER, MessageRole.ASSISTANT)
     ]
+
     if request.stream:
         return await _stream_response(
             request, conversation, history, current_user, org, db
@@ -177,8 +178,7 @@ async def _stream_response(request, conversation, history, current_user, org, db
     async def generate():
         full_response = ""
         try:
-            result = await llm_service._call_openai(messages=messages, stream=True)
-            stream = result["stream"]
+            stream = await llm_service._call_openai(messages=messages, stream=True)
 
             async for chunk in stream:
                 delta = chunk.choices[0].delta
