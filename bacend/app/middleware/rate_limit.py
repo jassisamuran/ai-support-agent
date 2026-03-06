@@ -14,4 +14,4 @@ async def check_rate_limit(user_id: str):
         await redis.expire(key, 60)
 
     if count > 10:
-        raise HTTPException(429, "Rate limit exceeds")
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
