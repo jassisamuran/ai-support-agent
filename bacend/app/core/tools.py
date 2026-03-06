@@ -3,7 +3,7 @@ import json
 from app.database import AsyncSessionLocal
 from app.models.ticket import Ticket, TicketPriority, TicketStatus
 
-TOOL_DEFINITION = [
+TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
@@ -26,13 +26,16 @@ TOOL_DEFINITION = [
         "type": "function",
         "function": {
             "name": "initiate_refund",
-            "description": "Issue a refund for an order. Only use when customer explicity requests it.",
+            "description": "Issue a refund for an order. Only use when customer explicitly requests it.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "order_id": {"type": "string"},
                     "reason": {"type": "string"},
-                    "amount": {"type": "amount", "description": {"Refund amount."}},
+                    "amount": {
+                        "type": "number",
+                        "description": "Refund amount in dollars",
+                    },
                 },
                 "required": ["order_id", "reason"],
             },
@@ -53,7 +56,7 @@ TOOL_DEFINITION = [
 ]
 
 
-async def check_order_status(order_id: str, customer_email: str = None) -> str:
+async def check_order_status(order_id: str, customer_email: str = None) -> dict:
     mock = {
         "ORD-001": {
             "status": "shipped",
@@ -108,7 +111,7 @@ async def initiate_refund(order_id: str, reason: str, amount: float = None) -> d
     }
 
 
-TOOL_EXECUROR = {
+TOOL_EXECUTOR = {
     "check_order_status": check_order_status,
     "initiate_refund": initiate_refund,
     "create_ticket": create_ticket,
