@@ -46,7 +46,7 @@ class CircuitBreaker:
             return True
 
         if self.state == CircuitState.OPEN:
-            if time.now - self.open_at >= self.recovery_timeout:
+            if time.time() - self.open_at >= self.recovery_timeout:
                 self.state = CircuitState.HALF_OPEN
                 logger.info("Circuit breaker HALF-OPEN -- testing OpenAI recovery")
                 return True
@@ -56,7 +56,7 @@ class CircuitBreaker:
 
 class LLMService:
     def __init__(self):
-        self.openai = AsyncOpenAI(api_key=settings.OPENAI_API_KEYS)
+        self.openai = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         self.anthropic = (
             AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
             if settings.ANTHROPIC_API_KEY
@@ -153,19 +153,20 @@ class LLMService:
 
                 if stream:
                     return {"stream": response, "model": settings.OPENAI_MODEL}
+                print("this", response)
 
-                prompt_tokens = response.usuage.promt_tokens
-                complete_tokens = response.usuage.completion_tokens
+                prompt_tokens = response.usage.prompt_tokens
+                complete_tokens = response.usage.completion_tokens
                 cost = self.calculate_cost(prompt_tokens, complete_tokens)
 
                 return {
                     "message": response.choices[0].message,
-                    "finish_reason": response.choice[0].finish_reason,
+                    "finish_reason": response.choices[0].finish_reason,
                     "model": settings.OPENAI_MODEL,
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": complete_tokens,
                     "cost_usd": cost,
-                    "latency_ms": int((time - time() - start_time) * 1000),
+                    "latency_ms": int((time.time() - start_time) * 1000),
                     "used_fallback": None,
                 }
 
@@ -193,8 +194,8 @@ class LLMService:
 
         response = await self._call_claude(non_system, system_prompt, temperature)
 
-        prompt_tokens = response.usuage.input_tokens
-        completion_tokens = response.usuage.output_tokens
+        prompt_tokens = response.usage.input_tokens
+        completion_tokens = response.usage.output_tokens
 
         class FakeMessage:
             def __init__(self, content):
