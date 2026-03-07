@@ -17,11 +17,18 @@ class Settings(BaseSettings):
     GPT4O_MINI_INPUT_COST_PER_1M: float
     OPENAI_MODEL: str
     GPT4O_MINI_OUTPUT_COST_PER_1M: float
+    CHROMA_HOST: str
+    CHROMA_PORT: str
     ANTHROPIC_MODEL: str
+    OPENAI_EMBEDDING_MODEL: str
     REDIS_URL: str = "redis://localhost:6379"
     OPENAI_API_KEY: str
     ANTHROPIC_API_KEY: str
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    CHROMA_COLLECTION: str
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 500
+    CACHE_SIMILARITY_THRESHOLD: float = 0.95  # 95% similar = cache hit
+    CACHE_TTL_SECONDS: int = 3600
+
     JWT_ALGORITHM: str = "HS256"
 
     class Config:
