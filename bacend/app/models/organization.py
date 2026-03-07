@@ -50,3 +50,4 @@ class Organization(Base):
     users = relationship("User", back_populates="organization")
     conversations = relationship("Conversation", back_populates="organization")
     prompt_versions = relationship("PromptVersion", back_populates="organization")
+    webhooks = relationship("Webhook", back_populates="organization")
