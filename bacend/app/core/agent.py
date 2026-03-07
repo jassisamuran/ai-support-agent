@@ -6,14 +6,10 @@ import time
 import structlog
 from app.config import settings
 from app.core.evaluator import evaluate_response
-
-# from app.core.rag import search_knowledge_base
-# from app.core.semantic_cache import cache_response, get_cached_response
+from app.core.semantic_cache import cache_response, get_cached_response
 from app.core.tools import TOOL_DEFINITIONS, TOOL_EXECUTOR
 from app.models.organization import Organization
 from app.models.prompt_version import PromptVersion
-
-# from app.services.billing_service import record_usage
 from app.services.llm_service import llm_service
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -80,9 +76,18 @@ class EnterpriseAgent:
         org: Organization,
         db: AsyncSession,
     ) -> dict:
-        start_time = time.time()
 
-        # add cache history after
+        cached = await get_cached_response(user_message, str(org.id))
+        if cached:
+            logger.info("Cache hit", similarity=cached["similarity"], org=org.slug)
+
+            return {
+                "response": cached["response"],
+                "tool_calls": [],
+                "tokens_used": 0,
+                "cost_usd": 0.0,
+                "from_cache": True,
+            }
 
         system_prompt = await _get_for_org(org, db)
         messages = [
@@ -97,7 +102,6 @@ class EnterpriseAgent:
         used_fallback = None
         rag_content = ""
         max_iterations = 5
-        print("now reached here ")
         for iteration in range(max_iterations):
             logger.info("Agent iteration", i=iteration, org=org.slug)
             llm_result = await llm_service.complete(
@@ -117,7 +121,9 @@ class EnterpriseAgent:
             if finish_reason == "stop":
                 final_response = message.content
 
-                # we have to cache response
+                asyncio.create_task(
+                    cache_response(user_message, final_response, str(org.id))
+                )
 
                 asyncio.create_task(
                     self._run_evaluation(

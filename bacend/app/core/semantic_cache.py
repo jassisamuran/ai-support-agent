@@ -26,7 +26,14 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (mag_b * mag_a)
 
 
+def contains_order_id(question: str) -> bool:
+    return "ORD-" in question.upper()
+
+
 async def get_cached_response(question: str, org_id: str) -> dict | None:
+
+    if contains_order_id(question):
+        return None
     query_embedding = await _embed(question)
 
     pattern = f"semcache:{org_id}:*"
