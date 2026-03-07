@@ -5,7 +5,7 @@ import redis.asyncio as aioredis
 from app.config import settings
 from openai import AsyncOpenAI
 
-openai_client = AsyncOpenAI(api_keys=settings.OPENAI_API_KEY)
+openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
@@ -26,12 +26,12 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (mag_b * mag_a)
 
 
-async def get_cache_response(question: str, org_id: str) -> dict | None:
+async def get_cached_response(question: str, org_id: str) -> dict | None:
     query_embedding = await _embed(question)
 
     pattern = f"semcache:{org_id}:*"
 
-    keys = await redis.get(pattern)
+    keys = await redis.keys(pattern)
 
     best_similarity = 0.0
     best_cached = None
@@ -49,7 +49,7 @@ async def get_cache_response(question: str, org_id: str) -> dict | None:
 
     if best_similarity >= settings.CACHE_SIMILARITY_THRESHOLD:
         return {
-            "response": best_cached("response"),
+            "response": best_cached["response"],
             "cache_hit": True,
             "similarity": round(best_similarity, 4),
         }
