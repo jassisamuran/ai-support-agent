@@ -67,8 +67,8 @@ class Message(Base):
     tool_calls = Column(JSONB, nullable=True)
     tool_results = Column(JSONB, nullable=True)
     tokens_used = Column(Integer, default=0)
-    from_cache = Column(Boolean, default=False)  # Was this a cache hit?
-    eval_score = Column(JSONB, nullable=True)  # Auto-eval scores
+    from_cache = Column(Boolean, default=False)
+    eval_score = Column(JSONB, nullable=True)
     created_at = Column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
