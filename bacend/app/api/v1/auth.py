@@ -1,7 +1,8 @@
+from app.config import settings
 from app.database import get_db
-from app.middleware.auth import create_access_token, hash_password, verify_password
+from app.middleware.auth import hash_password, verify_password
 from app.models.organization import Organization
-from app.models.user import User
+from app.models.user import User, UserRole
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
@@ -17,6 +18,12 @@ class RegisterRequest(BaseModel):
     password: str
     org_name: str
     org_slug: str
+
+
+class UserCreatedRequest(BaseModel):
+    external_user_id: str
+    email: str
+    name: str
 
 
 @router.post("/register", status_code=201)
@@ -58,19 +65,45 @@ async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.post("/token")
-async def login(
-    form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(select(User).where(User.email == form.username))
+# @router.post("/token")
+# async def login(
+#     form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)
+# ):
+#     result = await db.execute(select(User).where(User.email == form.username))
+
+#     user = result.scalar_one_or_none()
+
+#     if not user or not verify_password(form.password, user.hashed_pw):
+#         raise HTTPException(
+#             status_code=status.HTTP_401_UNAUTHORIZED,
+#             detail="Incorrect crendentials",
+#         )
+
+#     token = create_access_token({"sub": str(user.id), "org_id": str(user.org_id)})
+#     return {"access_token": token, "token type": "bearer"}
+
+
+@router.post("/user-created")
+async def user_created(payload: UserCreatedRequest, db: AsyncSession = Depends(get_db)):
+
+    result = await db.execute(
+        select(User).where(User.external_user_id == payload.external_user_id)
+    )
 
     user = result.scalar_one_or_none()
 
-    if not user or not verify_password(form.password, user.hashed_pw):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect crendentials",
-        )
+    if user:
+        return {"message": "User already exists"}
 
-    token = create_access_token({"sub": str(user.id), "org_id": str(user.org_id)})
-    return {"access_token": token, "token type": "bearer"}
+    user = User(
+        external_user_id=payload.external_user_id,
+        email=payload.email,
+        name=payload.name,
+        role=UserRole.CUSTOMER,
+        org_id=settings.DEFAULT_ORG_ID,
+    )
+
+    db.add(user)
+    await db.commit()
+
+    return {"message": "User created"}
