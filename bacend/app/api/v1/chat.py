@@ -81,7 +81,6 @@ async def send_message(
             {"conversation_id": str(conversation.id)},
             str(org.id),
         )
-        print("check2")
     db_result = await db.execute(
         select(Message)
         .where(Message.conversation_id == conversation.id)
