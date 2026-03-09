@@ -12,6 +12,7 @@ from app.middleware.tenant import get_current_org
 from app.models.conversation import Conversation, Message, MessageRole
 from app.models.organization import Organization
 from app.models.user import User
+from app.services.billing_service import check_billing_limit
 from app.services.llm_service import llm_service
 from app.services.webhook_service import fire_event
 from arq import create_pool
@@ -50,6 +51,13 @@ async def send_message(
     org: Organization = Depends(get_current_org),
 ):
     await check_rate_limit(str(current_user.id))
+
+    if not await check_billing_limit(org):
+        raise HTTPException(
+            402,
+            f"Monthly token limit reached for your {org.plan.value} plan",
+            "please upgrade your plane",
+        )
 
     if request.conversation_id:
         db_result = await db.execute(

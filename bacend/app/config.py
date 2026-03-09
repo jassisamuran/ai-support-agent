@@ -31,6 +31,11 @@ class Settings(BaseSettings):
 
     JWT_ALGORITHM: str = "HS256"
 
+    GPT4O_INPUT_COST_PER_1M: float = 5.0  # USD per 1M tokens
+    GPT4O_OUTPUT_COST_PER_1M: float = 15.0
+    FREE_PLAN_MONTHLY_TOKEN_LIMIT: int = 100_000
+    PRO_PLAN_MONTHLY_TOKEN_LIMIT: int = 2_000_000
+
     class Config:
         env_file = ".env"
         case_sensitive = True
