@@ -10,6 +10,7 @@ from app.core.semantic_cache import cache_response, get_cached_response
 from app.core.tools import TOOL_DEFINITIONS, TOOL_EXECUTOR
 from app.models.organization import Organization
 from app.models.prompt_version import PromptVersion
+from app.services.billing_service import record_usage
 from app.services.llm_service import llm_service
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -134,7 +135,16 @@ class EnterpriseAgent:
                     )
                 )
 
-                # we have to record billing here
+                asyncio.create_task(
+                    record_usage(
+                        org_id=str(org.id),
+                        model=llm_result["model"],
+                        prompt_tokens=total_prompt_tokens,
+                        completion_tokens=total_completion_tokens,
+                        cost_usd=total_cost,
+                        conversation_id=conversation_id,
+                    )
+                )
 
                 return {
                     "response": final_response,
