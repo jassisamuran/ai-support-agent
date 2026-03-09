@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.config import settings
 from app.database import get_db
-from app.models.user import User
+from app.models.user import User, UserRole
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -52,3 +52,12 @@ async def get_current_user(
     if not user or not user.is_active:
         raise error
     return user
+
+
+def require_role(*roles: str):
+    async def checker(current_user: User = Depends(get_current_user)) -> User:
+        if current_user.role.value not in roles and current_user.role != UserRole.OWNER:
+            raise HTTPException(403, f"Requires one of:  {roles}")
+        return current_user
+
+    return checker
