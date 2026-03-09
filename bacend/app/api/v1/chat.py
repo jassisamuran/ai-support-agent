@@ -50,7 +50,7 @@ async def send_message(
     current_user: User = Depends(get_current_user),
     org: Organization = Depends(get_current_org),
 ):
-    await check_rate_limit(str(current_user.id))
+    # await check_rate_limit(str(current_user.id))
 
     if not await check_billing_limit(org):
         raise HTTPException(
@@ -89,7 +89,6 @@ async def send_message(
             {"conversation_id": str(conversation.id)},
             str(org.id),
         )
-        print("check2")
     db_result = await db.execute(
         select(Message)
         .where(Message.conversation_id == conversation.id)
@@ -119,36 +118,6 @@ async def send_message(
         db=db,
     )
 
-    # messages = [
-    #     {
-    #         "role": "system",
-    #         "content": org.system_prompt or "You are helpful customer support agent.",
-    #     },
-    #     *history,
-    #     {"role": "user", "content": request.message},
-    # ]
-
-    # try:
-    #     llm_result = await llm_service.complete(messages=messages)
-    # except Exception:
-    #     llm_result = {
-    #         "response": "Sorry, AI service is temporarily unavailable.",
-    #         "tokens_used": 0,
-    #         "tool_calls": [],
-    #         "cost_usd": 0.0,
-    #         "from_cache": False,
-    #     }
-
-    # response_text = (
-    #     llm_result["message"].content
-    #     if llm_result and llm_result.get("message")
-    #     else "Sorry, I couldn't generate a response."
-    # )
-
-    # tokens_used = llm_result.get("total_tokens", 0)
-    # tool_calls = llm_result.get("tool_calls", [])
-    # from_cache = llm_result.get("from_cache", False)
-    # cost_usd = llm_result.get("cost_usd", 0.0)
     db.add(
         Message(
             org_id=org.id,
@@ -240,3 +209,47 @@ async def _stream_response(request, conversation, history, current_user, org, db
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.get("/latest-messages")
+async def latest_messages(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    org: Organization = Depends(get_current_org),
+):
+
+    result = await db.execute(
+        select(Conversation)
+        .where(
+            Conversation.user_id == current_user.id,
+            Conversation.org_id == org.id,
+        )
+        .order_by(Conversation.created_at.desc())
+        .limit(1)
+    )
+
+    conversation = result.scalar_one_or_none()
+
+    if not conversation:
+        return {"conversation_id": None, "messages": []}
+
+    result = await db.execute(
+        select(Message)
+        .where(Message.conversation_id == conversation.id)
+        .order_by(Message.created_at.desc())
+        .limit(20)
+    )
+
+    messages = list(reversed(result.scalars().all()))
+
+    return {
+        "conversation_id": str(conversation.id),
+        "messages": [
+            {
+                "role": msg.role.value,
+                "content": msg.content,
+                "created_at": msg.created_at,
+            }
+            for msg in messages
+        ],
+    }
