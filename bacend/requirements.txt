@@ -30,3 +30,4 @@ structlog==24.1.0
 pydantic-settings==2.3.1
 
 anthropic
+arq

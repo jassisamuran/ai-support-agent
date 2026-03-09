@@ -153,7 +153,6 @@ class LLMService:
 
                 if stream:
                     return {"stream": response, "model": settings.OPENAI_MODEL}
-                print("this", response)
 
                 prompt_tokens = response.usage.prompt_tokens
                 complete_tokens = response.usage.completion_tokens

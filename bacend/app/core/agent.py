@@ -107,7 +107,6 @@ class EnterpriseAgent:
             llm_result = await llm_service.complete(
                 messages=messages, tools=TOOL_DEFINITIONS, temperature=0.1
             )
-            print("now checking this", llm_result)
 
             total_prompt_tokens += llm_result["prompt_tokens"]
             total_completion_tokens += llm_result["completion_tokens"]

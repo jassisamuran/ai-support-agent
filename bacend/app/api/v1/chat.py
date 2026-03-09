@@ -1,10 +1,11 @@
+import asyncio
 import json
 from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
 from app.core.agent import enterprise_agent
-from app.database import get_db
+from app.database import get_db, settings
 from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import check_rate_limit
 from app.middleware.tenant import get_current_org
@@ -12,6 +13,9 @@ from app.models.conversation import Conversation, Message, MessageRole
 from app.models.organization import Organization
 from app.models.user import User
 from app.services.llm_service import llm_service
+from app.services.webhook_service import fire_event
+from arq import create_pool
+from arq.connections import RedisSettings
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -70,6 +74,14 @@ async def send_message(
         db.add(conversation)
         await db.flush()
 
+        pool = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
+        await pool.enqueue_job(
+            "task_ingest_document",
+            "conversation.started",
+            {"conversation_id": str(conversation.id)},
+            str(org.id),
+        )
+        print("check2")
     db_result = await db.execute(
         select(Message)
         .where(Message.conversation_id == conversation.id)
