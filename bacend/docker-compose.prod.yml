@@ -1,0 +1,49 @@
+version: "3.9"
+
+services:
+  backend:
+    build: .
+    container_name: ai_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file: .env.prod
+    depends_on:
+      - chromadb
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  worker:
+    build: .
+    container_name: ai_worker
+    restart: always
+    command: python -m app.workers.main
+    env_file: .env.prod
+    depends_on:
+      - chromadb
+    networks:
+      - app_network
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: ai_chromadb
+    restart: always
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - ANONYMIZED_TELEMETRY=FALSE
+    networks:
+      - app_network
+
+networks:
+  app_network:
+    driver: bridge
+
+volumes:
+  chroma_data:

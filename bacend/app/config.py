@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     GPT4O_OUTPUT_COST_PER_1M: float = 15.0
     FREE_PLAN_MONTHLY_TOKEN_LIMIT: int = 100_000
     PRO_PLAN_MONTHLY_TOKEN_LIMIT: int = 2_000_000
+    DEFAULT_ORG_ID: str = "550e8400-e29b-41d4-a716-446655440000"
 
     class Config:
         env_file = ".env"
