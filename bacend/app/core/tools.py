@@ -56,26 +56,35 @@ TOOL_DEFINITIONS = [
 ]
 
 
-async def check_order_status(order_id: str, customer_email: str = None) -> dict:
-    mock = {
-        "ORD-001": {
-            "status": "shipped",
-            "tracking": "TRK123456",
-            "eta": "2024-03-20",
-            "total": 99.99,
-        },
-        "ORD-002": {"status": "processing", "eta": "2024-03-25", "total": 49.99},
-        "ORD-003": {
-            "status": "delivered",
-            "delivered_at": "2024-03-10",
-            "total": 199.99,
-        },
-    }
+import httpx
 
-    if order_id in mock:
-        return {"success": True, "order": mock[order_id]}
 
-    return {"success": False, "error": f"Order {order_id} not found"}
+async def check_order_status(
+    order_id: str, customer_email: str = None, context: dict | None = None
+) -> dict:
+    try:
+        token = context.get("auth_token") if context else None
+        print("now is", token)
+        token = context.get("auth_token") if context else None
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"http://localhost:5000/api/orders/{order_id}/status",
+                headers={"Authorization": token} if token else None,
+            )
+        if response.status_code == 200:
+            data = response.json()
+            print(data)
+        else:
+            print("API error:", response.status_code)
+        if response.status_code != 200:
+            return {"success": False, "error": f"Order {order_id} not found"}
+
+        order = response.json()
+
+        return {"success": True, "order": order}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 async def create_ticket(

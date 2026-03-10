@@ -76,9 +76,11 @@ class EnterpriseAgent:
         conversation_id: str,
         org: Organization,
         db: AsyncSession,
+        context: dict | None = None,
     ) -> dict:
 
         cached = await get_cached_response(user_message, str(org.id))
+        cached = False
         if cached:
             logger.info("Cache hit", similarity=cached["similarity"], org=org.slug)
 
@@ -206,7 +208,9 @@ class EnterpriseAgent:
                                 )
                             )
                         elif name in TOOL_EXECUTOR:
-                            tool_result = json.dumps(await TOOL_EXECUTOR[name](**args))
+                            tool_result = json.dumps(
+                                await TOOL_EXECUTOR[name](**args, context=context)
+                            )
 
                         else:
                             tool_result = f"Tool '{name}' not available."

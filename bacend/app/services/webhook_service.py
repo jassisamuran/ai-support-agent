@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import httpx
 import structlog
 from app.database import AsyncSessionLocal
-from app.models.weebhook import Webhook
+from app.models.webhook import Webhook
 from sqlalchemy import select
 
 logger = structlog.get_logger()

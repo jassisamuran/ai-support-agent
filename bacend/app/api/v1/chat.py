@@ -17,7 +17,7 @@ from app.services.llm_service import llm_service
 from app.services.webhook_service import fire_event
 from arq import create_pool
 from arq.connections import RedisSettings
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -46,11 +46,13 @@ class ChatResponse(BaseModel):
 @router.post("/message", response_model=ChatResponse)
 async def send_message(
     request: ChatRequest,
+    http_request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
     org: Organization = Depends(get_current_org),
 ):
-    # await check_rate_limit(str(current_user.id))
+    await check_rate_limit(str(current_user.id))
+    user_token = http_request.headers.get("Authorization")
 
     if not await check_billing_limit(org):
         raise HTTPException(
@@ -116,6 +118,7 @@ async def send_message(
         conversation_id=str(conversation.id),
         org=org,
         db=db,
+        context={"auth_token": user_token},
     )
 
     db.add(

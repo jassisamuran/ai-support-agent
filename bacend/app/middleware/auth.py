@@ -12,6 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 oauth2_schema = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token")
 pwd_content = CryptContext(schemes=["argon2"], deprecated="auto")
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPBearer
+from jose import JWTError, jwt
+from sqlalchemy import select
+
+security = HTTPBearer()
 
 
 def hash_password(password: str) -> str:
@@ -30,27 +36,29 @@ def create_access_token(data: dict) -> str:
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
 
-async def get_current_user(
-    token: str = Depends(oauth2_schema), db: AsyncSession = Depends(get_db)
-) -> User:
-    error = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid or expired token",
-    )
+async def get_current_user(token=Depends(security), db: AsyncSession = Depends(get_db)):
     try:
         payload = jwt.decode(
-            token, settings.SECRET_KEY, algorithms=[settings.JWT_ALGORITHM]
+            token.credentials,
+            settings.SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
         )
-        user_id = payload.get("sub")
-        if not user_id:
-            raise error
-    except JWTError:
-        raise error
+        external_user_id = payload.get("id")
 
-    result = await db.execute(select(User).where(User.id == user_id))
+        if not external_user_id:
+            raise HTTPException(401, "Invalid token")
+
+    except JWTError:
+        raise HTTPException(401, "Invalid token")
+
+    result = await db.execute(
+        select(User).where(User.external_user_id == external_user_id)
+    )
     user = result.scalar_one_or_none()
-    if not user or not user.is_active:
-        raise error
+
+    if not user:
+        raise HTTPException(401, "User not found")
+
     return user
 
 

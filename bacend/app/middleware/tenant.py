@@ -8,19 +8,42 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logger = structlog.get_logger()
 
 
+DEFAULT_ORG_SLUG = "ecommerce-support"
+
+
 async def get_current_org(
-    x_api_key: str = Header(..., alias="X-API-Key"), db: AsyncSession = Depends(get_db)
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
+    db: AsyncSession = Depends(get_db),
 ) -> Organization:
+
+    if x_api_key:
+        result = await db.execute(
+            select(Organization).where(
+                Organization.api_key == x_api_key,
+                Organization.is_active == True,
+            )
+        )
+        org = result.scalar_one_or_none()
+
+        if org:
+            logger.info("Request from org via api key", org=org.slug)
+            return org
+
+    # Fallback → default organization
     result = await db.execute(
         select(Organization).where(
-            Organization.api_key == x_api_key, Organization.is_active
+            Organization.slug == DEFAULT_ORG_SLUG,
+            Organization.is_active == True,
         )
     )
 
     org = result.scalar_one_or_none()
 
     if not org:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+        raise HTTPException(
+            status_code=500,
+            detail="Default organization not configured",
+        )
 
-    logger.info("Request from org", org=org.slug)
+    logger.info("Request using default org", org=org.slug)
     return org

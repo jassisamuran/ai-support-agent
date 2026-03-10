@@ -20,9 +20,9 @@ class User(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    external_user_id = Column(String, index=True)
     email = Column(String, nullable=False, index=True)
     name = Column(String, nullable=False)
-    hashed_pw = Column(String, nullable=False)
     role = Column(Enum(UserRole), default=UserRole.CUSTOMER)
     is_active = Column(Boolean, default=True)
     created_at = Column(
@@ -36,5 +36,3 @@ class User(Base):
     tickets = relationship(
         "Ticket", back_populates="user", foreign_keys="Ticket.user_id"
     )
-    # Email unique per org (not globally)
-    __table_args__ = ({"schema": None},)
