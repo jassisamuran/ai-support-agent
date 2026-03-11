@@ -56,9 +56,9 @@ async def send_message(
 
     # if not await check_billing_limit(org):
     #     raise HTTPException(
-    #         402,
-    #         f"Monthly token limit reached for your {org.plan.value} plan",
-    #         "please upgrade your plane",
+    #         status_code=402,
+    #         detail="Monthly token limit reached for your free plan",
+    #         headers={"X-Error": "Token limit exceeded"},
     #     )
 
     if request.conversation_id:
