@@ -1,7 +1,7 @@
-import json
-
+import httpx
 from app.database import AsyncSessionLocal, settings
-from app.models.ticket import Ticket, TicketPriority, TicketStatus
+from app.models.ticket import Ticket, TicketPriority
+from sqlalchemy import select
 
 TOOL_DEFINITIONS = [
     {
@@ -53,10 +53,37 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "sentiment_detection",
+            "description": "Detect sentiment of customer message. Use when customer is complaining or angry.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "Customer message"}
+                },
+                "required": ["message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_ticket",
+            "description": "Create a support ticket when issue cannot be solved automatically.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "priority": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+                },
+                "required": ["title", "description", "priority"],
+            },
+        },
+    },
 ]
-
-
-import httpx
 
 
 async def check_order_status(
@@ -96,19 +123,34 @@ async def create_ticket(
     priority: str,
     user_id: str = None,
     conversation_id: str = None,
+    org_id: str = None,
 ) -> dict:
+
     async with AsyncSessionLocal() as db:
+        if conversation_id:
+            result = await db.execute(
+                select(Ticket).where(Ticket.conversation_id == conversation_id)
+            )
+            existing_ticket = result.scalar_one_or_none()
+
+            if existing_ticket:
+                return {
+                    "ticket_id": str(existing_ticket.id),
+                    "message": "A support ticket already exists for this issue.",
+                }
+
         ticket = Ticket(
             user_id=user_id,
             conversation_id=conversation_id,
             title=title,
             description=description,
-            priority=TicketPriority(priority),
+            priority=TicketPriority(priority.lower()),
         )
 
         db.add(ticket)
         await db.commit()
         await db.refresh(ticket)
+
     return {"ticket_id": str(ticket.id), "message": f"Ticket created: {title}"}
 
 
@@ -125,8 +167,31 @@ async def initiate_refund(
     }
 
 
+async def sentiment_detection(message: str, context: dict | None = None) -> dict:
+
+    negative_words = [
+        "bad",
+        "terrible",
+        "worst",
+        "angry",
+        "damaged",
+        "late",
+        "complaint",
+        "refund",
+    ]
+
+    sentiment = "POSITIVE"
+
+    for word in negative_words:
+        if word in message.lower():
+            sentiment = "NEGATIVE"
+
+    return {"sentiment": sentiment, "message": message}
+
+
 TOOL_EXECUTOR = {
     "check_order_status": check_order_status,
     "initiate_refund": initiate_refund,
     "create_ticket": create_ticket,
+    "sentiment_detection": sentiment_detection,
 }
