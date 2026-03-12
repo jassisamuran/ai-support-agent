@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     ANTHROPIC_MODEL: str
     OPENAI_EMBEDDING_MODEL: str
     REDIS_URL: str = "redis://localhost:6379"
+    BACKEND_API: str
     OPENAI_API_KEY: str
     ANTHROPIC_API_KEY: str
     CHROMA_COLLECTION: str

@@ -18,6 +18,12 @@ from jose import JWTError, jwt
 from sqlalchemy import select
 
 security = HTTPBearer()
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPBearer
+from jose import JWTError, jwt
+from sqlalchemy import select
+
+security = HTTPBearer()
 
 
 def hash_password(password: str) -> str:
@@ -38,6 +44,7 @@ def create_access_token(data: dict) -> str:
 
 async def get_current_user(token=Depends(security), db: AsyncSession = Depends(get_db)):
     try:
+        print("now", token)
         payload = jwt.decode(
             token.credentials,
             settings.SECRET_KEY,
@@ -48,17 +55,24 @@ async def get_current_user(token=Depends(security), db: AsyncSession = Depends(g
         if not external_user_id:
             raise HTTPException(401, "Invalid token")
 
+        external_user_id = payload.get("id")
+
+        if not external_user_id:
+            raise HTTPException(401, "Invalid token")
+
     except JWTError:
+        raise HTTPException(401, "Invalid token")
         raise HTTPException(401, "Invalid token")
 
     result = await db.execute(
         select(User).where(User.external_user_id == external_user_id)
     )
+
     user = result.scalar_one_or_none()
 
     if not user:
         raise HTTPException(401, "User not found")
-
+    print("correct now")
     return user
 
 

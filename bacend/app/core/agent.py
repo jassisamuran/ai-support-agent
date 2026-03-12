@@ -233,7 +233,7 @@ class EnterpriseAgent:
 
         return {
             "response": "I'm having trouble processing your request. A ticket has been created and a human agent will follow up.",
-            "tools_calls": tool_calls_log,
+            "tool_calls": tool_calls_log,
             "tokens_used": total_prompt_tokens + total_completion_tokens,
             "cost_usd": total_cost,
             "from_cache": False,

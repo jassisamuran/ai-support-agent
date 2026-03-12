@@ -1,6 +1,6 @@
 import json
 
-from app.database import AsyncSessionLocal
+from app.database import AsyncSessionLocal, settings
 from app.models.ticket import Ticket, TicketPriority, TicketStatus
 
 TOOL_DEFINITIONS = [
@@ -68,7 +68,7 @@ async def check_order_status(
         token = context.get("auth_token") if context else None
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                f"http://localhost:5000/api/orders/{order_id}/status",
+                f"{settings.BACKEND_API}/api/orders/{order_id}/status",
                 headers={"Authorization": token} if token else None,
             )
         if response.status_code == 200:
@@ -82,6 +82,9 @@ async def check_order_status(
         order = response.json()
 
         return {"success": True, "order": order}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -109,7 +112,9 @@ async def create_ticket(
     return {"ticket_id": str(ticket.id), "message": f"Ticket created: {title}"}
 
 
-async def initiate_refund(order_id: str, reason: str, amount: float = None) -> dict:
+async def initiate_refund(
+    order_id: str, reason: str, amount: float = None, context: dict | None = None
+) -> dict:
 
     return {
         "success": True,

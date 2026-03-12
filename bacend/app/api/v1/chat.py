@@ -54,12 +54,12 @@ async def send_message(
     await check_rate_limit(str(current_user.id))
     user_token = http_request.headers.get("Authorization")
 
-    if not await check_billing_limit(org):
-        raise HTTPException(
-            402,
-            f"Monthly token limit reached for your {org.plan.value} plan",
-            "please upgrade your plane",
-        )
+    # if not await check_billing_limit(org):
+    #     raise HTTPException(
+    #         402,
+    #         f"Monthly token limit reached for your {org.plan.value} plan",
+    #         "please upgrade your plane",
+    #     )
 
     if request.conversation_id:
         db_result = await db.execute(

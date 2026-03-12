@@ -41,13 +41,16 @@ async def record_usage(
 
 
 async def check_billing_limit(org: Organization) -> bool:
-    total_tokens = org.monthly_output_tokens + org.monthly_input_tokens
-    if total_tokens >= org.monthly_token_limit:
+    input_tokens = org.monthly_input_tokens or 0
+    output_tokens = org.monthly_output_tokens or 0
+    limit = org.monthly_token_limit or 0
+
+    total_tokens = input_tokens + output_tokens
+
+    if total_tokens >= limit:
         logger.warning(
-            "Org over token limit",
-            org.slug,
-            used=total_tokens,
-            limit=org.monthly_token_limit,
+            f"Org {org.slug} over token limit. Used={total_tokens}, Limit={limit}"
         )
         return False
+
     return True
