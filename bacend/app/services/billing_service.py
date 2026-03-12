@@ -49,7 +49,10 @@ async def check_billing_limit(org: Organization) -> bool:
 
     if total_tokens >= limit:
         logger.warning(
-            f"Org {org.slug} over token limit. Used={total_tokens}, Limit={limit}"
+            "Org over token limit",
+            org_slug=org.slug,
+            used=total_tokens,
+            limit=org.monthly_token_limit,
         )
         return False
 
