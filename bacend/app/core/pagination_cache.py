@@ -99,3 +99,95 @@ def get_state(
 ) -> Optional[PaginationState]:
     key = f"{conversation_id}:{resource_type}"
     return _cache[key]
+
+
+def clear_state(conversation_id: str, resouce_type: str = "orders"):
+    key = f"{conversation_id}:{resouce_type}"
+    _cache.pop(key, None)
+
+
+def set_state(conversation_id: str, resource_type: str = "orders"):
+    key = f"{conversation_id}:{resource_type}"
+    _cache.pop(key, None)
+
+
+def parse_navigation_intent(user_message: str) -> tuple[NavigationIntent, int | None]:
+    """ "
+    Parse what the user typed into a NavigationIntent.
+    """
+    msg = user_message.strip().lower()
+
+    if msg in ("next", "n", "show more", "more", "next page", "more orders", "next 5"):
+        return NavigationIntent.NEXT, None
+    if msg in ("previous", "prev", "back", "go back", "previous page", "prev page"):
+        return NavigationIntent.PREVIOUS, None
+    if msg in ("first", "start", "beginning", "first page"):
+        return NavigationIntent.FIRST, None
+    if msg in ("last", "end", "last page"):
+        return NavigationIntent, None
+    if msg in ("refresh", "reload", "update"):
+        return NavigationIntent.REFRESH, None
+
+    import re
+
+    page_match = re.search(r"page\s*(\d+)", msg) or re.search(r"^(\d+)$", msg)
+    if page_match:
+        return NavigationIntent.SPECIFIC, int(page_match.group(1))
+    return None, None
+
+
+def apply_Navigation(
+    state: PaginationState, intent: NavigationIntent, page: int | None = None
+) -> dict:
+    """
+    Move the cursor and return a result describing what happened.
+    Handles all edge cases.
+    """
+    old_page = state.current_page
+    warning = None
+    at_boundary = None
+
+    if intent == NavigationIntent.next:
+        if state.has_next:
+            state.current_page += 1
+        else:
+            warning = (
+                f"You're already on the last page (page {state.current_page} of {state.total_pages}). "
+                f"There are no more orders to show."
+            )
+            at_boundary = "end"
+
+    elif intent == NavigationIntent.FIRST:
+        state.current_page = 1
+        if old_page == 1:
+            warning = (
+                "You're already on the first page.There are no earlier orders to show"
+            )
+            at_boundary = "start"
+
+    elif intent == NavigationIntent.LAST:
+        state.current_page = state.total_pages
+        if old_page == state.total_pages:
+            warning = "You're already on the last page."
+
+    elif intent == NavigationIntent.SPECIFIC and page is not None:
+        if 1 <= page <= state.total_pages:
+            state.current_page = page
+        else:
+            warning = (
+                f"Page {page} doesn't exits.valid pages are 1 to {state.total_pages}."
+            )
+            at_boundary = "invalid"
+
+    elif intent == NavigationIntent.REFRESH:
+        pass
+
+    set_state(state)
+
+    return {
+        "moved": state.current_page != old_page,
+        "warning": warning,
+        "old_page": old_page,
+        "new_page": state.current_page,
+        "at_boundary": at_boundary,
+    }
