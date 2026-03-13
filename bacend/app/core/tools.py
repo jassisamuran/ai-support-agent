@@ -134,6 +134,171 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_orders",
+            "description": (
+                "Fetch the cutomer's order history for a date range.",
+                "Always call this FIRST when the user asks 'show my orders'",
+                "'what did I order last month' or any multi-order query."
+                "Results are paginated - call navigate_orders for next/previous pages."
+                "DO NOT call this again when the user says next/previous - user navigate_orders instead.",
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "period": {
+                        "type": "string",
+                        "enum": [
+                            "last_week",
+                            "last_month",
+                            "last_3_monts",
+                            "last_year",
+                            "all_time",
+                        ],
+                        "description": "Time period to fetch orders for",
+                    },
+                    "status_filter": {
+                        "type": "string",
+                        "enum": [
+                            "all",
+                            "pending",
+                            "processing",
+                            "shipped",
+                            "delivered",
+                            "cancelled",
+                            "refunded",
+                        ],
+                        "descriptioin": "Filter order by status. Default: all",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max orders to fetch in one API call (default 50, max 100). The chatbot will paginate these locally — do not set this to 5.",
+                        "default": 50,
+                        "minimum": 1,
+                        "maximum": 100,
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "enum": ["date_desc", "date_asc", "amount_desc", "amount_asc"],
+                        "description": "Sort order. Default: date_desc(newest_first)",
+                        "default": "date_desc",
+                    },
+                },
+                "required": ["period"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "navigate_orders",
+            "description": (
+                "Navigate between pages of orders already fetched by list_orders."
+                "use when the user says 'next', 'previous', 'prev' 'go to page 3', etc."
+                "This does not call the API  again -it can reads from cache."
+                "If no order list is cached yet, call list_orders first."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "enum": [
+                            "next",
+                            "previous",
+                            "first",
+                            "last",
+                            "specific",
+                            "refresh",
+                        ],
+                        "description": "Navigation direction",
+                    },
+                    "page_number": {
+                        "type": "integer",
+                        "description": "Required only when direction='specific'. The page number to jump to.",
+                    },
+                },
+                "required": ["direction"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_tickets",
+            "description": (
+                "Fetch the customer's support tickets."
+                "Use when user asks 'show my tickets' , 'what tickets do I have'."
+                "Results are paginated - use navigate_tickets for next/previous"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status_filter": {
+                        "type": "string",
+                        "enum": ["all", "open", "in_progress", "resolved", "closed"],
+                        "default": "all",
+                    },
+                    "limit": {"type": "integer", "default": 50, "maximum": 100},
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "navigate_tickets",
+            "description": (
+                "Navigate between pages of tickets fetched list_tickets."
+                "Use when user says next/previous in the context of tickets."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "enum": [
+                            "next",
+                            "previous",
+                            "first",
+                            "last",
+                            "specific",
+                            "refresh",
+                        ],
+                    },
+                    "page_number": {
+                        "type": "integer",
+                        "description": "Required only when direction='specific'.",
+                    },
+                },
+                "required": ["direction"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_order_updates",
+            "description": (
+                "Check if order currently on the displayed page has changed status"
+                "since it was last shown. Call this when user say 'any updates?'."
+                "'refresh', or when the background watcher reports a change."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "check_all_pages": {
+                        "description": "If true, checks all chached orders. If false, only current page.",
+                        "default": False,
+                    }
+                },
+                "required": [],
+            },
+        },
+    },
 ]
 
 
