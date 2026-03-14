@@ -1,6 +1,20 @@
+import asyncio
+
 import httpx
 from app.database import AsyncSessionLocal, settings
 from app.models.ticket import Ticket, TicketPriority
+from pagination_cache import (
+    CACHE_TTL,
+    PAGE_SIZE,
+    NavigationIntent,
+    OrderSnapshot,
+    PaginationState,
+    apply_navigation,
+    clear_state,
+    get_state,
+    parse_navigation_intent,
+    set_state,
+)
 from sqlalchemy import select
 
 TOOL_DEFINITIONS = [
@@ -302,12 +316,473 @@ TOOL_DEFINITIONS = [
 ]
 
 
+def _format_order_card(order: dict, index: int, stale: bool = False) -> str:
+    "Format a single order as a readable chatboat message."
+    oid = order.get("id") or order.get("order_id", "N/A")
+    status = order.get("status", "unknown").upper()
+    date = order.get("created_at", "")[:10]
+    amount = order.get("total_amount", 0)
+    items_count = len(order.get("items", []))
+    stale_flag = "*status just changed" if stale else ""
+
+    return (
+        f"{index}. Order #{oid} | {status}{stale_flag}\n"
+        f"Date: {date} | Total ${amount:.2f} | Items: {items_count}"
+    )
+
+
+def _build_page_response(state: PaginationState) -> dict:
+    items = state.current_items
+    start_index = (state.current_page - 1) * state.page_size + 1
+    stale_ids = state.stale_ids
+
+    lines = []
+    for i, order in enumerate(items):
+        oid = order.get("id") or order.get("order_id", "")
+        is_stale = oid in stale_ids
+        lines.append(_format_order_card(order, start_index + 1, stale=is_stale))
+
+    state.clear_stale()
+
+    for order in items:
+        state.snapshot_order(order)
+    set_state(state)
+
+    nav_parts = []
+    if state.has_previous:
+        nav_parts.append(
+            f"← Type **previous** for orders {start_index - state.page_size}–{start_index - 1}"
+        )
+    if state.has_next:
+        end_next = min(
+            start_index + state.page_size + state.page_size - 1, state.total_items
+        )
+        nav_parts.append(
+            f"→ Type **next** for orders {start_index + state.page_size}–{end_next}"
+        )
+
+    boundary_msgs = []
+    if not state.has_previous:
+        boundary_msgs.append("This is first page -- no earlier orders.")
+    if not state.has_next:
+        boundary_msgs.append("This is the last page -- no more orders.")
+
+    return {
+        "success": True,
+        "page": state.current_page,
+        "total_pages": state.total_items,
+        "total_items": state.total_items,
+        "showing": f"Orders {start_index}–{start_index + len(items) - 1} of {state.total_items}",
+        "orders": items,
+        "formatted_lines": lines,
+        "navigation_hints": nav_parts,
+        "boundary_messages": boundary_msgs,
+        "has_next": state.has_next,
+        "has_previous": state.has_previous,
+    }
+
+
+async def list_order(
+    period: str = "last_month",
+    status_filter: str = "all",
+    limit: int = 50,
+    sort_by: int = "date_desc",
+    context: dict | None = None,
+):
+    conversation_id = (context or {}).get("conversation_id", "default")
+    token = (context or {}).get("auth_token")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{settings.BACKEND_API}/api/orders",
+                params={
+                    "period": period,
+                    "status": status_filter if status_filter != "all" else None,
+                    "limit": limit,
+                    "sort_by": sort_by,
+                },
+                headers={"Authorization": f"Bearer {token}"} if token else {},
+                timeout=10.0,
+            )
+
+            if response.status_code != 200:
+                return {
+                    "success": False,
+                    "error": f"Failed to fetch orders: {response.status_code}",
+                }
+
+            data = response.json()
+
+            orders = data.get("orders", data) if isinstance(data, dict) else data
+
+            if not orders:
+                return {
+                    "success": True,
+                    "total_items": 0,
+                    "message": f"No orders found for {period.replace('_', '')}.",
+                }
+
+            state = PaginationState(
+                conversation_id=conversation_id,
+                resource_type="orders",
+                all_items=orders,
+                current_page=1,
+                page_size=PAGE_SIZE,
+            )
+
+            set_state(state)
+            result = _build_page_response(state)
+            result["message"] = (
+                f"Found **{state.total_items} orders** from {period.replace('_', ' ')}. "
+                f"Showing page 1 of {state.total_pages} ({PAGE_SIZE} per page)."
+            )
+
+            return result
+
+    except httpx.TimeoutException:
+        return {"success": False, "error": "Request timed out. Please try again."}
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+async def navigate_order(
+    direction: str, page_number: int | None = None, context: dict | None = None
+):
+    """
+    Navigate cached order list. Does not call API.
+    """
+    conversation_id = (context or {}).get("conversation_id", "default")
+    state = get_state(conversation_id, "orders")
+
+    if state is None:
+        return {
+            "success": False,
+            "error": "no_cache",
+            "message": (
+                "I don't have any orders loaded yet. "
+                "Please ask me to 'show my orders' first, then I can navigate between pages."
+            ),
+        }
+
+    if state.is_list_stale:
+        token = context.get("auth_token") if context else None
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{settings.BACKEND_API}/api/orders",
+                headers={"Authorization": token} if token else None,
+                params={"period": "last_month"},
+            )
+
+        if response.status_code != 200:
+            return {"success": False, "error": "Orders fetched failed"}
+
+        else:
+            data = response.json()
+            state = get_state(conversation_id, data)
+            if state is None:
+                return {"success": False, "error": "Failed to reload orders."}
+
+            response["message"] = (
+                "Your order list was refreshed (it was over 5 minutes old)",
+                f"Now showing page 1 of {state.total_pages}.",
+            )
+            return response
+
+    intent_map = {
+        "next": NavigationIntent.NEXT,
+        "previous": NavigationIntent.PREVIOUS,
+        "first": NavigationIntent.FIRST,
+        "last": NavigationIntent.LAST,
+        "specific": NavigationIntent.SPECIFIC,
+        "refresh": NavigationIntent.REFRESH,
+    }
+
+    intent = intent_map.get(direction, NavigationIntent.NEXT)
+
+    if intent == NavigationIntent.REFRESH:
+        return await _refresh_current_page(state, context)
+
+    nav_result = apply_navigation(state, intent, page=page_number)
+
+    if nav_result["warning"]:
+        page_data = _build_page_response(state)
+        page_data["warning"] = nav_result["warning"]
+        page_data["at_boundary"] = nav_result["at_boundary"]
+        return page_data
+
+    result = _build_page_response(state)
+    result["navigation_result"] = nav_result
+    return result
+
+
+async def _refresh_current_page(state: PaginationState, context: dict | None) -> dict:
+    """Re-fetch orders on the current page from the api"""
+    token = (context or {}).get("auth_token")
+    changed = []
+
+    for order in state.current_items:
+        oid = order.get("id") or order.get("order_id", "")
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{settings.BACKEND_API}/api/orders/{oid}/status",
+                    headers={"Authorization": f"Bearer {token}"} if token else {},
+                )
+
+            if resp.status_code == 200:
+                fresh = resp.json()
+                snap = state.snapshots.get(oid)
+                if snap and snap.status_changed(fresh):
+                    changed.append(
+                        {
+                            "order_id": oid,
+                            "old_status": snap.status_at_fetch,
+                            "new_status": fresh.get("status"),
+                        }
+                    )
+
+                    for i, item in enumerate(state.all_items):
+                        item_id = item.get("id") or item.get("order_id", "")
+                        if item_id == oid:
+                            state.all_items[i] = fresh
+                            break
+
+                    state.snapshot_order(fresh)
+        except Exception:
+            pass
+
+    set_state(state)
+    result = _build_page_response(state)
+    result["refreshed"] = True
+    if changed:
+        result["change_summary"] = (
+            f"⚠️ {len(changed)} order(s) changed status since you last viewed this page:\n"
+            + "\n".join(
+                f"  • Order #{c['order_id']}: {c['old_status'].upper()} → {c['new_status'].upper()}"
+                for c in changed
+            )
+        )
+    else:
+        result["change_summary"] = "✅ No status changes detected on this page."
+    return result
+
+
+async def list_tickets(
+    status_filter: str = "all", limit: int = 50, context: dict | None = None
+):
+    conversation_id = (context or {}).get("conversation_id", "default")
+    token = (context or {}).get("auth_token")
+
+    async with AsyncSessionLocal() as db:
+        query = select(Ticket)
+        if status_filter != "all":
+            query = query.where(Ticket.status == status_filter)
+        query = query.limit(limit).order_by(Ticket.created_at.desc())
+        results = await db.execute(query)
+        tickets = results.scalars().all()
+
+        ticket_dicts = [
+            {
+                "id": str(t.id),
+                "title": t.title,
+                "description": t.description,
+                "priority": t.priority.value,
+                "status": t.status,
+                "created_at": str(t.created_at),
+            }
+            for t in tickets
+        ]
+
+        if not ticket_dicts:
+            return {"success": True, "total_items": 0, "message": "No tickets found."}
+
+        state = PaginationState(
+            conversation_id=conversation_id,
+            resource_type="tickets",
+            all_items=ticket_dicts,
+            current_page=1,
+            page_size=PAGE_SIZE,
+        )
+        set_state(state)
+
+        items = state.current_items
+        start_index = 1
+        lines = []
+        for i, t in enumerate(items):
+            lines.append(
+                f"{i + 1}. Ticket #{t['id'][:8]}… | {t['status'].upper()} | Priority: {t['priority'].upper()}\n"
+                f"   {t['title']}"
+            )
+
+        nav_parts = []
+        if state.has_next:
+            nav_parts.append(
+                f"→ Type **next** for tickets {start_index + PAGE_SIZE}–{min(start_index + PAGE_SIZE * 2 - 1, state.total_items)}"
+            )
+
+        return {
+            "success": True,
+            "page": 1,
+            "total_pages": state.total_pages,
+            "total_items": state.total_items,
+            "showing": f"Tickets 1–{len(items)} of {state.total_items}",
+            "tickets": items,
+            "formatted_lines": lines,
+            "navigation_hints": nav_parts,
+            "message": f"Found **{state.total_items} tickets**. showing page 1 of {state.total_pages}.",
+        }
+
+
+async def navigate_tickets(
+    direction: str, page_number: int | None = None, context: dict | None = None
+) -> dict:
+    conversation_id = (context or {}).get("conversation_id", "default")
+    state = get_state(conversation_id, "tickets")
+
+    intent_map = {
+        "next": NavigationIntent.NEXT,
+        "previous": NavigationIntent.PREVIOUS,
+        "first": NavigationIntent.FIRST,
+        "last": NavigationIntent.LAST,
+        "specific": NavigationIntent.SPECIFIC,
+        "refresh": NavigationIntent.REFRESH,
+    }
+
+    intent = intent_map.get(direction, NavigationIntent.NEXT)
+
+    nav_result = apply_navigation(state, intent, page=page_number)
+
+    items = state.current_items
+    start_index = (state.current_page - 1) * state.page_size + 1
+    lines = []
+    for i, t in enumerate(items):
+        lines.append(
+            f"{start_index + i}. Ticket #{t['id'][:8]}… | {t.get('status', '').upper()} | {t.get('priority', '').upper()}\n"
+            f"   {t['title']}"
+        )
+
+    nav_parts = []
+    if state.has_previous:
+        nav_parts.append("<- Type **previous** for earlier tickets")
+    elif state.has_next:
+        nav_parts.append("-> Type **next** for more tickets")
+
+    boundary_msgs = []
+
+    if not state.has_previous:
+        boundary_msgs.append("This is the first page of tickets.")
+    if not state.has_next:
+        boundary_msgs.append("This is the lasts page of tickets.")
+
+    result = {
+        "success": True,
+        "page": state.current_page,
+        "total_pages": state.total_pages,
+        "total_items": state.total_items,
+        "showing": f"Tickets {start_index}–{start_index + len(items) - 1} of {state.total_items}",
+        "tickets": items,
+        "formatted_lines": lines,
+        "navigation_hints": nav_parts,
+        "boundary_messages": boundary_msgs,
+    }
+
+    if nav_result.get("warning"):
+        result["warning"] = nav_result["warning"]
+
+    return result
+
+
+async def get_order_updates(
+    check_all_pages: bool = False,
+    context: dict | None = None,
+) -> dict:
+    """
+    Check if any order the user is currently viewing has changed status.
+    This is triggered by:
+      1. User says "any updates?" or "refresh"
+      2. Background watcher fires a change notification
+    """
+    conversation_id = (context or {}).get("conversation_id", "default")
+    state = get_state(conversation_id, "orders")
+
+    if state is None:
+        return {
+            "success": False,
+            "message": "No orders loaded. Ask to show your orders first.",
+        }
+
+    orders_to_check = state.all_items if check_all_pages else state.current_items
+    token = (context or {}).get("auth_token")
+    changed = []
+    errors = []
+
+    async def check_one(order: dict):
+        oid = order.get("id") or order.get("order_id", "")
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{settings.BACKEND_API}/api/orders/{oid}/status",
+                    headers={"Authorization": f"Bearer {token}"} if token else {},
+                    timeout=5.0,
+                )
+            if resp.status_code == 200:
+                fresh = resp.json()
+                snap = state.snapshots.get(oid)
+                if snap and snap.status_changed(fresh):
+                    changed.append(
+                        {
+                            "order_id": oid,
+                            "old_status": snap.status_at_fetch,
+                            "new_status": fresh.get("status"),
+                            "order": fresh,
+                        }
+                    )
+                    for i, item in enumerate(state.all_items):
+                        iid = item.get("id") or item.get("order_id", "")
+                        if iid == oid:
+                            state.all_items[i] = fresh
+                    state.snapshot_order(fresh)
+        except Exception as e:
+            errors.append(str(e))
+
+    # Run all checks concurrently
+    await asyncio.gather(*[check_one(o) for o in orders_to_check])
+    set_state(state)
+
+    if not changed:
+        return {
+            "success": True,
+            "changed": False,
+            "message": "✅ No order status changes detected. Everything looks the same.",
+            "checked": len(orders_to_check),
+        }
+
+    summary_lines = []
+    for c in changed:
+        summary_lines.append(
+            f"• Order #{c['order_id']}: **{c['old_status'].upper()}** → **{c['new_status'].upper()}**"
+        )
+
+    return {
+        "success": True,
+        "changed": True,
+        "changed_count": len(changed),
+        "changed_orders": changed,
+        "summary": "\n".join(summary_lines),
+        "message": (
+            f"⚠️ **{len(changed)} order(s) changed status** while you were viewing:\n"
+            + "\n".join(summary_lines)
+            + "\n\nType **refresh** to see the updated page."
+        ),
+    }
+
+
 async def check_order_status(
     order_id: str, customer_email: str = None, context: dict | None = None
 ) -> dict:
     try:
-        token = context.get("auth_token") if context else None
-        print("now is", token)
         token = context.get("auth_token") if context else None
         async with httpx.AsyncClient() as client:
             response = await client.get(
@@ -565,6 +1040,11 @@ TOOL_EXECUTOR = {
     "cancel_order": cancel_order,
     "initiate_refund": initiate_refund,
     "check_product_stock": check_product_stock,
+    "list_orders": list_order,
+    "navigate_orders": navigate_order,
+    "list_tickets": list_tickets,
+    "navigate_tickets": navigate_tickets,
+    "get_order_updated": get_order_updates,
     "search_knowledge_base": search_knowledge_base,
     "create_ticket": create_ticket,
     "sentiment_detection": sentiment_detection,
