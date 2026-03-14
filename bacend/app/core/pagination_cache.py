@@ -1,12 +1,17 @@
-import asyncio
+import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Optional
+
+import redis.asyncio as aioredis
+from app.config import settings
 
 PAGE_SIZE = 5
 CACHE_TTL = 300
 ORDER_SNAP_TTL = 60
+
+redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
 class NavigationIntent(str, Enum):
@@ -84,31 +89,53 @@ class PaginationState:
             status_at_fetch=order.get("status", ""),
         )
 
-    def mark_statle(self, order_id: str):
+    def mark_stale(self, order_id: str):
         self.stale_ids.add(order_id)
 
     def clear_stale(self):
         self.stale_ids.clear()
 
 
-_cache: dict[str, PaginationState] = {}
+def redis_key(conversation_id: str, resource_type: str = "orders"):
+    return f"pagination:{conversation_id}:{resource_type}"
 
 
-def get_state(
+async def get_state(
     conversation_id: str, resource_type: str = "orders"
 ) -> Optional[PaginationState]:
-    key = f"{conversation_id}:{resource_type}"
-    return _cache[key]
+
+    key = redis_key(conversation_id, resource_type)
+
+    raw = await redis.get(key)
+
+    if not raw:
+        return None
+
+    data = json.loads(raw)
+
+    state = PaginationState(**data)
+
+    state.stale_ids = set(data.get("stale_ids", []))
+
+    return state
 
 
-def clear_state(conversation_id: str, resouce_type: str = "orders"):
-    key = f"{conversation_id}:{resouce_type}"
-    _cache.pop(key, None)
+async def set_state(state: PaginationState):
+
+    key = redis_key(state.conversation_id, state.resource_type)
+
+    data = asdict(state)
+
+    data["stale_ids"] = list(state.stale_ids)
+
+    await redis.set(key, json.dumps(data), ex=CACHE_TTL)
 
 
-def set_state(conversation_id: str, resource_type: str = "orders"):
-    key = f"{conversation_id}:{resource_type}"
-    _cache.pop(key, None)
+async def clear_state(conversation_id: str, resource_type: str = "orders"):
+
+    key = redis_key(conversation_id, resource_type)
+
+    await redis.delete(key)
 
 
 def parse_navigation_intent(user_message: str) -> tuple[NavigationIntent, int | None]:
@@ -124,7 +151,7 @@ def parse_navigation_intent(user_message: str) -> tuple[NavigationIntent, int | 
     if msg in ("first", "start", "beginning", "first page"):
         return NavigationIntent.FIRST, None
     if msg in ("last", "end", "last page"):
-        return NavigationIntent, None
+        return NavigationIntent.LAST, None
     if msg in ("refresh", "reload", "update"):
         return NavigationIntent.REFRESH, None
 
@@ -136,7 +163,7 @@ def parse_navigation_intent(user_message: str) -> tuple[NavigationIntent, int | 
     return None, None
 
 
-def apply_Navigation(
+async def apply_navigation(
     state: PaginationState, intent: NavigationIntent, page: int | None = None
 ) -> dict:
     """
@@ -147,22 +174,27 @@ def apply_Navigation(
     warning = None
     at_boundary = None
 
-    if intent == NavigationIntent.next:
+    if intent == NavigationIntent.NEXT:
         if state.has_next:
             state.current_page += 1
         else:
             warning = (
-                f"You're already on the last page (page {state.current_page} of {state.total_pages}). "
-                f"There are no more orders to show."
+                f"You're already on the last page "
+                f"(page {state.current_page} of {state.total_pages})."
             )
             at_boundary = "end"
+
+    elif intent == NavigationIntent.PREVIOUS:
+        if state.has_previous:
+            state.current_page -= 1
+        else:
+            warning = "You're already on the first page."
+            at_boundary = "start"
 
     elif intent == NavigationIntent.FIRST:
         state.current_page = 1
         if old_page == 1:
-            warning = (
-                "You're already on the first page.There are no earlier orders to show"
-            )
+            warning = "You're already on the first page."
             at_boundary = "start"
 
     elif intent == NavigationIntent.LAST:
@@ -175,14 +207,14 @@ def apply_Navigation(
             state.current_page = page
         else:
             warning = (
-                f"Page {page} doesn't exits.valid pages are 1 to {state.total_pages}."
+                f"Page {page} doesn't exist. Valid pages are 1 to {state.total_pages}."
             )
             at_boundary = "invalid"
 
     elif intent == NavigationIntent.REFRESH:
         pass
 
-    set_state(state)
+    await set_state(state)
 
     return {
         "moved": state.current_page != old_page,
