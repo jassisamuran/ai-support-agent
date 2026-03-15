@@ -2,6 +2,8 @@ import asyncio
 import json
 
 import httpx
+from sqlalchemy import select
+
 from app.core.pagination_cache import (
     CACHE_TTL,
     PAGE_SIZE,
@@ -16,7 +18,6 @@ from app.core.pagination_cache import (
 )
 from app.database import AsyncSessionLocal, settings
 from app.models.ticket import Ticket, TicketPriority
-from sqlalchemy import select
 
 TOOL_DEFINITIONS = [
     {
@@ -34,6 +35,39 @@ TOOL_DEFINITIONS = [
                     },
                 },
                 "required": ["order_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "summarise_orders",
+            "description": (
+                "Return a summary of customer orders for a time range. "
+                "Use when the user asks for totals or analytics instead of individual orders. "
+                "Examples: "
+                "'summary of last 3 days orders', "
+                "'how much did I spend last 4 days', "
+                "'total orders this week', "
+                "'order summary for last 10 days'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": (
+                            "Number of past days to include in the summary. "
+                            "Examples: "
+                            "'last 3 days' → days=3, "
+                            "'last 4 days' → days=4, "
+                            "'last 2 weeks' → days=14"
+                        ),
+                        "minimum": 1,
+                        "maximum": 3650,
+                    }
+                },
+                "required": ["days"],
             },
         },
     },
@@ -429,6 +463,36 @@ async def _build_page_response(state: PaginationState) -> dict:
     }
 
 
+async def summarise_orders(
+    days: int = 30, status_filter: str = "shipped", context: dict | None = None
+):
+    """For finding summary of orders according to user command"""
+    conversation_id = (context or {}).get("conversation_id", "default")
+    token = (context or {}).get("auth_token")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{settings.BACKEND_API}/api/orders/getOrderSummary",
+                params={
+                    "days": days,
+                    "status": status_filter if status_filter != "all" else None,
+                },
+                headers={"Authorization": f"{token}"} if token else {},
+            )
+
+        if response.status_code != 200:
+            return {
+                "success": False,
+                "error": f"Failed to summarise order : {response.status_code}",
+            }
+        return {"success": True, "summary": response.json()}
+    except httpx.TimeoutException:
+        return {"success": False, "error": "Request timed out. Please try again."}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 async def list_orders(
     period: str = "last_month",
     custom_days: int | None = None,
@@ -450,10 +514,8 @@ async def list_orders(
     The key insight: you don't need a new enum for every possible period.
     custom_days handles any arbitrary range the user can ask for.
     """
-    print("chcing this", context)
     conversation_id = (context or {}).get("conversation_id", "default")
     token = (context or {}).get("auth_token")
-    print("nosis", token)
 
     days = _resolve_period_days(period, custom_days)
     if custom_days is not None:
@@ -1102,4 +1164,5 @@ TOOL_EXECUTOR = {
     "search_knowledge_base": search_knowledge_base,
     "create_ticket": create_ticket,
     "sentiment_detection": sentiment_detection,
+    "summarise_orders": summarise_orders,
 }
