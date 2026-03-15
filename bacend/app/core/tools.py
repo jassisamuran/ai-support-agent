@@ -1,9 +1,8 @@
 import asyncio
+import json
 
 import httpx
-from app.database import AsyncSessionLocal, settings
-from app.models.ticket import Ticket, TicketPriority
-from pagination_cache import (
+from app.core.pagination_cache import (
     CACHE_TTL,
     PAGE_SIZE,
     NavigationIntent,
@@ -15,6 +14,8 @@ from pagination_cache import (
     parse_navigation_intent,
     set_state,
 )
+from app.database import AsyncSessionLocal, settings
+from app.models.ticket import Ticket, TicketPriority
 from sqlalchemy import select
 
 TOOL_DEFINITIONS = [
@@ -153,11 +154,12 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "list_orders",
             "description": (
-                "Fetch the cutomer's order history for a date range.",
-                "Always call this FIRST when the user asks 'show my orders'",
-                "'what did I order last month' or any multi-order query."
-                "Results are paginated - call navigate_orders for next/previous pages."
-                "DO NOT call this again when the user says next/previous - user navigate_orders instead.",
+                "Fetch the customer's order history for a date range. "
+                "Always call this FIRST when the user asks 'show my orders', "
+                "'what did I order last month', or any multi-order query. "
+                "Results are paginated — call navigate_orders for next/previous pages. "
+                "DO NOT call this again when the user says next/previous — use navigate_orders instead. "
+                "For periods not in the enum (e.g. 'last 5 months'), use custom_days instead."
             ),
             "parameters": {
                 "type": "object",
@@ -167,11 +169,28 @@ TOOL_DEFINITIONS = [
                         "enum": [
                             "last_week",
                             "last_month",
-                            "last_3_monts",
+                            "last_3_months",
+                            "last_6_months",
                             "last_year",
                             "all_time",
                         ],
-                        "description": "Time period to fetch orders for",
+                        "description": (
+                            "Time period to fetch orders for. "
+                            "Use 'last_6_months' when user says 'last 4 months', 'last 5 months', "
+                            "'last 6 months' — it is the closest standard window. "
+                            "For any other custom range, use custom_days instead."
+                        ),
+                    },
+                    "custom_days": {
+                        "type": "integer",
+                        "description": (
+                            "Fetch orders from the last N days. "
+                            "Use this when the user asks for a period not in the enum — "
+                            "e.g. 'last 5 months' = 150, 'last 10 weeks' = 70, 'last 2 months' = 60. "
+                            "When custom_days is set, period is ignored. Max: 730 (2 years)."
+                        ),
+                        "minimum": 1,
+                        "maximum": 730,
                     },
                     "status_filter": {
                         "type": "string",
@@ -184,11 +203,14 @@ TOOL_DEFINITIONS = [
                             "cancelled",
                             "refunded",
                         ],
-                        "descriptioin": "Filter order by status. Default: all",
+                        "description": "Filter orders by status. Default: all",
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max orders to fetch in one API call (default 50, max 100). The chatbot will paginate these locally — do not set this to 5.",
+                        "description": (
+                            "Max orders to fetch in one API call (default 50, max 100). "
+                            "The chatbot paginates locally — do not set this to 5."
+                        ),
                         "default": 50,
                         "minimum": 1,
                         "maximum": 100,
@@ -196,7 +218,7 @@ TOOL_DEFINITIONS = [
                     "sort_by": {
                         "type": "string",
                         "enum": ["date_desc", "date_asc", "amount_desc", "amount_asc"],
-                        "description": "Sort order. Default: date_desc(newest_first)",
+                        "description": "Sort order. Default: date_desc (newest first)",
                         "default": "date_desc",
                     },
                 },
@@ -209,9 +231,9 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "navigate_orders",
             "description": (
-                "Navigate between pages of orders already fetched by list_orders."
-                "use when the user says 'next', 'previous', 'prev' 'go to page 3', etc."
-                "This does not call the API  again -it can reads from cache."
+                "Navigate between pages of orders already fetched by list_orders. "
+                "Use when the user says 'next', 'previous', 'prev', 'go to page 3', etc. "
+                "This does NOT call the API again — it reads from cache. "
                 "If no order list is cached yet, call list_orders first."
             ),
             "parameters": {
@@ -243,9 +265,9 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "list_tickets",
             "description": (
-                "Fetch the customer's support tickets."
-                "Use when user asks 'show my tickets' , 'what tickets do I have'."
-                "Results are paginated - use navigate_tickets for next/previous"
+                "Fetch the customer's support tickets. "
+                "Use when user asks 'show my tickets', 'what tickets do I have'. "
+                "Results are paginated — use navigate_tickets for next/previous."
             ),
             "parameters": {
                 "type": "object",
@@ -257,8 +279,8 @@ TOOL_DEFINITIONS = [
                     },
                     "limit": {"type": "integer", "default": 50, "maximum": 100},
                 },
+                "required": [],
             },
-            "required": [],
         },
     },
     {
@@ -266,7 +288,7 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "navigate_tickets",
             "description": (
-                "Navigate between pages of tickets fetched list_tickets."
+                "Navigate between pages of tickets fetched by list_tickets. "
                 "Use when user says next/previous in the context of tickets."
             ),
             "parameters": {
@@ -297,15 +319,16 @@ TOOL_DEFINITIONS = [
         "function": {
             "name": "get_order_updates",
             "description": (
-                "Check if order currently on the displayed page has changed status"
-                "since it was last shown. Call this when user say 'any updates?'."
+                "Check if any order currently on the displayed page has changed status "
+                "since it was last shown. Call this when user says 'any updates?', "
                 "'refresh', or when the background watcher reports a change."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "check_all_pages": {
-                        "description": "If true, checks all chached orders. If false, only current page.",
+                        "type": "boolean",
+                        "description": "If true, checks all cached orders. If false, only current page.",
                         "default": False,
                     }
                 },
@@ -315,23 +338,47 @@ TOOL_DEFINITIONS = [
     },
 ]
 
+PERIOD_DAYS = {
+    "last_week": 7,
+    "last_month": 30,
+    "last_3_months": 90,
+    "last_6_months": 180,
+    "last_year": 365,
+    "all_time": 3650,
+}
+
+
+def _resolve_period_days(period: str, custom_days: int | None) -> int:
+    """
+    Convert period string or custom_days into a single integer day count.
+
+    This is the key function for handling "last 5 months":
+      - LLM sends custom_days=150 (5 * 30)
+      - We pass that number directly to the API as ?days=150
+      - No need to add a new enum value for every possible period
+
+    Priority: custom_days > period
+    """
+    if custom_days is not None:
+        return min(max(int(custom_days), 1), 730)  # clamp 1..730
+    return PERIOD_DAYS.get(period, 30)
+
 
 def _format_order_card(order: dict, index: int, stale: bool = False) -> str:
-    "Format a single order as a readable chatboat message."
+    """Format a single order as a readable chatbot message line."""
     oid = order.get("id") or order.get("order_id", "N/A")
     status = order.get("status", "unknown").upper()
     date = order.get("created_at", "")[:10]
     amount = order.get("total_amount", 0)
     items_count = len(order.get("items", []))
-    stale_flag = "*status just changed" if stale else ""
-
+    stale_flag = " *status just changed*" if stale else ""
     return (
         f"{index}. Order #{oid} | {status}{stale_flag}\n"
-        f"Date: {date} | Total ${amount:.2f} | Items: {items_count}"
+        f"Date: {date} | Total: ${amount:.2f} | Items: {items_count}"
     )
 
 
-def _build_page_response(state: PaginationState) -> dict:
+async def _build_page_response(state: PaginationState) -> dict:
     items = state.current_items
     start_index = (state.current_page - 1) * state.page_size + 1
     stale_ids = state.stale_ids
@@ -340,13 +387,13 @@ def _build_page_response(state: PaginationState) -> dict:
     for i, order in enumerate(items):
         oid = order.get("id") or order.get("order_id", "")
         is_stale = oid in stale_ids
-        lines.append(_format_order_card(order, start_index + 1, stale=is_stale))
+
+        lines.append(_format_order_card(order, start_index + i, stale=is_stale))
 
     state.clear_stale()
-
     for order in items:
         state.snapshot_order(order)
-    set_state(state)
+    await set_state(state)
 
     nav_parts = []
     if state.has_previous:
@@ -363,14 +410,14 @@ def _build_page_response(state: PaginationState) -> dict:
 
     boundary_msgs = []
     if not state.has_previous:
-        boundary_msgs.append("This is first page -- no earlier orders.")
+        boundary_msgs.append(" This is the first page — no earlier orders.")
     if not state.has_next:
-        boundary_msgs.append("This is the last page -- no more orders.")
+        boundary_msgs.append(" This is the last page — no more orders.")
 
     return {
         "success": True,
         "page": state.current_page,
-        "total_pages": state.total_items,
+        "total_pages": state.total_pages,
         "total_items": state.total_items,
         "showing": f"Orders {start_index}–{start_index + len(items) - 1} of {state.total_items}",
         "orders": items,
@@ -382,79 +429,98 @@ def _build_page_response(state: PaginationState) -> dict:
     }
 
 
-async def list_order(
+async def list_orders(
     period: str = "last_month",
+    custom_days: int | None = None,
     status_filter: str = "all",
     limit: int = 50,
-    sort_by: int = "date_desc",
+    sort_by: str = "date_desc",
     context: dict | None = None,
-):
+) -> dict:
+    """
+    HOW "LAST 5 MONTHS" IS HANDLED:
+    ─────────────────────────────────
+    The LLM sees "last 5 months" in the user message.
+    The tool definition says: for custom periods, use custom_days.
+    The LLM calls: list_orders(period="last_month", custom_days=150)
+    _resolve_period_days() sees custom_days=150 and uses that.
+    We pass ?days=150 to your Node.js API.
+    Your Node.js getOrdersWithFilters() uses that to set fromDate.
+
+    The key insight: you don't need a new enum for every possible period.
+    custom_days handles any arbitrary range the user can ask for.
+    """
+    print("chcing this", context)
     conversation_id = (context or {}).get("conversation_id", "default")
     token = (context or {}).get("auth_token")
+    print("nosis", token)
+
+    days = _resolve_period_days(period, custom_days)
+    if custom_days is not None:
+        period_label = f"the last {custom_days} days"
+    else:
+        period_label = period.replace("_", " ")
 
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                f"{settings.BACKEND_API}/api/orders",
+                f"{settings.BACKEND_API}/api/orders/list",
                 params={
-                    "period": period,
+                    "days": days,
                     "status": status_filter if status_filter != "all" else None,
                     "limit": limit,
                     "sort_by": sort_by,
                 },
-                headers={"Authorization": f"Bearer {token}"} if token else {},
-                timeout=10.0,
+                headers={"Authorization": f"{token}"} if token else {},
             )
 
-            if response.status_code != 200:
-                return {
-                    "success": False,
-                    "error": f"Failed to fetch orders: {response.status_code}",
-                }
+        if response.status_code != 200:
+            return {
+                "success": False,
+                "error": f"Failed to fetch orders: {response.status_code}",
+            }
 
-            data = response.json()
+        data = response.json()
+        orders = data.get("orders", data) if isinstance(data, dict) else data
 
-            orders = data.get("orders", data) if isinstance(data, dict) else data
+        if not orders:
+            return {
+                "success": True,
+                "total_items": 0,
+                "message": f"No orders found for {period_label}.",
+            }
 
-            if not orders:
-                return {
-                    "success": True,
-                    "total_items": 0,
-                    "message": f"No orders found for {period.replace('_', '')}.",
-                }
+        state = PaginationState(
+            conversation_id=conversation_id,
+            resource_type="orders",
+            all_items=orders,
+            current_page=1,
+            page_size=PAGE_SIZE,
+        )
+        await set_state(state)
 
-            state = PaginationState(
-                conversation_id=conversation_id,
-                resource_type="orders",
-                all_items=orders,
-                current_page=1,
-                page_size=PAGE_SIZE,
-            )
-
-            set_state(state)
-            result = _build_page_response(state)
-            result["message"] = (
-                f"Found **{state.total_items} orders** from {period.replace('_', ' ')}. "
-                f"Showing page 1 of {state.total_pages} ({PAGE_SIZE} per page)."
-            )
-
-            return result
+        result = await _build_page_response(state)
+        result["message"] = (
+            f"Found **{state.total_items} orders** from {period_label}. "
+            f"Showing page 1 of {state.total_pages} ({PAGE_SIZE} per page)."
+        )
+        return result
 
     except httpx.TimeoutException:
         return {"success": False, "error": "Request timed out. Please try again."}
-
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
-async def navigate_order(
-    direction: str, page_number: int | None = None, context: dict | None = None
-):
-    """
-    Navigate cached order list. Does not call API.
-    """
+async def navigate_orders(
+    direction: str,
+    page_number: int | None = None,
+    context: dict | None = None,
+) -> dict:
+    """Navigate cached order list. Does NOT call the API."""
     conversation_id = (context or {}).get("conversation_id", "default")
-    state = get_state(conversation_id, "orders")
+    state = await get_state(conversation_id, "orders")
+    print("check now ", state)
 
     if state is None:
         return {
@@ -504,21 +570,21 @@ async def navigate_order(
     if intent == NavigationIntent.REFRESH:
         return await _refresh_current_page(state, context)
 
-    nav_result = apply_navigation(state, intent, page=page_number)
+    nav_result = await apply_navigation(state, intent, page=page_number)
 
     if nav_result["warning"]:
-        page_data = _build_page_response(state)
+        page_data = await _build_page_response(state)
         page_data["warning"] = nav_result["warning"]
         page_data["at_boundary"] = nav_result["at_boundary"]
         return page_data
 
-    result = _build_page_response(state)
+    result = await _build_page_response(state)
     result["navigation_result"] = nav_result
     return result
 
 
 async def _refresh_current_page(state: PaginationState, context: dict | None) -> dict:
-    """Re-fetch orders on the current page from the api"""
+    """Re-fetch orders on the current page from the API to detect status changes."""
     token = (context or {}).get("auth_token")
     changed = []
 
@@ -554,26 +620,28 @@ async def _refresh_current_page(state: PaginationState, context: dict | None) ->
             pass
 
     set_state(state)
-    result = _build_page_response(state)
+    result = await _build_page_response(state)
     result["refreshed"] = True
+    result["changed_orders"] = changed
     if changed:
         result["change_summary"] = (
-            f"⚠️ {len(changed)} order(s) changed status since you last viewed this page:\n"
+            f" {len(changed)} order(s) changed status since you last viewed this page:\n"
             + "\n".join(
                 f"  • Order #{c['order_id']}: {c['old_status'].upper()} → {c['new_status'].upper()}"
                 for c in changed
             )
         )
     else:
-        result["change_summary"] = "✅ No status changes detected on this page."
+        result["change_summary"] = " No status changes detected on this page."
     return result
 
 
 async def list_tickets(
-    status_filter: str = "all", limit: int = 50, context: dict | None = None
-):
+    status_filter: str = "all",
+    limit: int = 50,
+    context: dict | None = None,
+) -> dict:
     conversation_id = (context or {}).get("conversation_id", "default")
-    token = (context or {}).get("auth_token")
 
     async with AsyncSessionLocal() as db:
         query = select(Ticket)
@@ -583,63 +651,74 @@ async def list_tickets(
         results = await db.execute(query)
         tickets = results.scalars().all()
 
-        ticket_dicts = [
-            {
-                "id": str(t.id),
-                "title": t.title,
-                "description": t.description,
-                "priority": t.priority.value,
-                "status": t.status,
-                "created_at": str(t.created_at),
-            }
-            for t in tickets
-        ]
-
-        if not ticket_dicts:
-            return {"success": True, "total_items": 0, "message": "No tickets found."}
-
-        state = PaginationState(
-            conversation_id=conversation_id,
-            resource_type="tickets",
-            all_items=ticket_dicts,
-            current_page=1,
-            page_size=PAGE_SIZE,
-        )
-        set_state(state)
-
-        items = state.current_items
-        start_index = 1
-        lines = []
-        for i, t in enumerate(items):
-            lines.append(
-                f"{i + 1}. Ticket #{t['id'][:8]}… | {t['status'].upper()} | Priority: {t['priority'].upper()}\n"
-                f"   {t['title']}"
-            )
-
-        nav_parts = []
-        if state.has_next:
-            nav_parts.append(
-                f"→ Type **next** for tickets {start_index + PAGE_SIZE}–{min(start_index + PAGE_SIZE * 2 - 1, state.total_items)}"
-            )
-
-        return {
-            "success": True,
-            "page": 1,
-            "total_pages": state.total_pages,
-            "total_items": state.total_items,
-            "showing": f"Tickets 1–{len(items)} of {state.total_items}",
-            "tickets": items,
-            "formatted_lines": lines,
-            "navigation_hints": nav_parts,
-            "message": f"Found **{state.total_items} tickets**. showing page 1 of {state.total_pages}.",
+    ticket_dicts = [
+        {
+            "id": str(t.id),
+            "title": t.title,
+            "description": t.description,
+            "priority": t.priority.value,
+            "status": t.status,
+            "created_at": str(t.created_at),
         }
+        for t in tickets
+    ]
+
+    if not ticket_dicts:
+        return {"success": True, "total_items": 0, "message": "No tickets found."}
+
+    state = PaginationState(
+        conversation_id=conversation_id,
+        resource_type="tickets",
+        all_items=ticket_dicts,
+        current_page=1,
+        page_size=PAGE_SIZE,
+    )
+    set_state(state)
+
+    items = state.current_items
+    start_index = 1
+    lines = []
+    for i, t in enumerate(items):
+        lines.append(
+            f"{i + 1}. Ticket #{t['id'][:8]}… | {t['status'].upper()} | Priority: {t['priority'].upper()}\n"
+            f"   {t['title']}"
+        )
+
+    nav_parts = []
+    if state.has_next:
+        nav_parts.append(
+            f"→ Type **next** for tickets {start_index + PAGE_SIZE}–"
+            f"{min(start_index + PAGE_SIZE * 2 - 1, state.total_items)}"
+        )
+
+    return {
+        "success": True,
+        "page": 1,
+        "total_pages": state.total_pages,
+        "total_items": state.total_items,
+        "showing": f"Tickets 1–{len(items)} of {state.total_items}",
+        "tickets": items,
+        "formatted_lines": lines,
+        "navigation_hints": nav_parts,
+        "message": f"Found **{state.total_items} tickets**. Showing page 1 of {state.total_pages}.",
+    }
 
 
 async def navigate_tickets(
-    direction: str, page_number: int | None = None, context: dict | None = None
+    direction: str,
+    page_number: int | None = None,
+    context: dict | None = None,
 ) -> dict:
+
     conversation_id = (context or {}).get("conversation_id", "default")
-    state = get_state(conversation_id, "tickets")
+    state = await get_state(conversation_id, "tickets")
+
+    if state is None:
+        return {
+            "success": False,
+            "error": "no_cache",
+            "message": "Please ask me to 'show my tickets' first.",
+        }
 
     intent_map = {
         "next": NavigationIntent.NEXT,
@@ -665,16 +744,16 @@ async def navigate_tickets(
 
     nav_parts = []
     if state.has_previous:
-        nav_parts.append("<- Type **previous** for earlier tickets")
-    elif state.has_next:
-        nav_parts.append("-> Type **next** for more tickets")
+        nav_parts.append("← Type **previous** for earlier tickets")
+
+    if state.has_next:
+        nav_parts.append("→ Type **next** for more tickets")
 
     boundary_msgs = []
-
     if not state.has_previous:
         boundary_msgs.append("This is the first page of tickets.")
     if not state.has_next:
-        boundary_msgs.append("This is the lasts page of tickets.")
+        boundary_msgs.append("This is the last page of tickets.")
 
     result = {
         "success": True,
@@ -705,7 +784,7 @@ async def get_order_updates(
       2. Background watcher fires a change notification
     """
     conversation_id = (context or {}).get("conversation_id", "default")
-    state = get_state(conversation_id, "orders")
+    state = await get_state(conversation_id, "orders")
 
     if state is None:
         return {
@@ -747,7 +826,6 @@ async def get_order_updates(
         except Exception as e:
             errors.append(str(e))
 
-    # Run all checks concurrently
     await asyncio.gather(*[check_one(o) for o in orders_to_check])
     set_state(state)
 
@@ -755,16 +833,14 @@ async def get_order_updates(
         return {
             "success": True,
             "changed": False,
-            "message": "✅ No order status changes detected. Everything looks the same.",
+            "message": "No order status changes detected. Everything looks the same.",
             "checked": len(orders_to_check),
         }
 
-    summary_lines = []
-    for c in changed:
-        summary_lines.append(
-            f"• Order #{c['order_id']}: **{c['old_status'].upper()}** → **{c['new_status'].upper()}**"
-        )
-
+    summary_lines = [
+        f"• Order #{c['order_id']}: **{c['old_status'].upper()}** → **{c['new_status'].upper()}**"
+        for c in changed
+    ]
     return {
         "success": True,
         "changed": True,
@@ -772,7 +848,7 @@ async def get_order_updates(
         "changed_orders": changed,
         "summary": "\n".join(summary_lines),
         "message": (
-            f"⚠️ **{len(changed)} order(s) changed status** while you were viewing:\n"
+            f"**{len(changed)} order(s) changed status** while you were viewing:\n"
             + "\n".join(summary_lines)
             + "\n\nType **refresh** to see the updated page."
         ),
@@ -783,27 +859,15 @@ async def check_order_status(
     order_id: str, customer_email: str = None, context: dict | None = None
 ) -> dict:
     try:
-        token = context.get("auth_token") if context else None
+        token = (context or {}).get("auth_token")
         async with httpx.AsyncClient() as client:
             response = await client.get(
                 f"{settings.BACKEND_API}/api/orders/{order_id}/status",
-                headers={"Authorization": token} if token else None,
+                headers={"Authorization": f"Bearer {token}"} if token else {},
             )
-        if response.status_code == 200:
-            data = response.json()
-            print(data)
-        else:
-            print("API error:", response.status_code)
         if response.status_code != 200:
             return {"success": False, "error": f"Order {order_id} not found"}
-
-        order = response.json()
-
-        return {"success": True, "order": order}
-
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
+        return {"success": True, "order": response.json()}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -853,7 +917,7 @@ async def initiate_refund(
         "success": True,
         "refund_id": f"REF-{order_id}-001",
         "amount": amount or "full refund",
-        "eta": "5-7 buisness days",
+        "eta": "5-7 business days",
         "message": f"Refund initiated for order {order_id}.",
     }
 
@@ -908,9 +972,7 @@ async def sentiment_detection(message: str, context: dict | None = None) -> dict
         sentiment = "POSITIVE"
         priority = "LOW"
     else:
-        sentiment = "NEUTRAL"
-        priority = "MEDIUM"
-
+        sentiment, priority = "NEUTRAL", "MEDIUM"
     return {
         "sentiment": sentiment,
         "priority": priority,
@@ -921,19 +983,17 @@ async def sentiment_detection(message: str, context: dict | None = None) -> dict
 
 
 async def cancel_order(order_id: str, reason: str = None, context: dict | None = None):
-    "Cancel an order before shipment"
     try:
-        token = context.get("auth_token") if context else None
-
+        token = (context or {}).get("auth_token")
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{settings.BACKEND_API}/api/orders/{order_id}",
-                json={"resaon": reason},
+                f"{settings.BACKEND_API}/api/orders/{order_id}/cancel",
+                json={"reason": reason},
                 headers={"Authorization": f"Bearer {token}"} if token else {},
             )
         if response.status_code == 200:
             return {
-                "sucess": True,
+                "success": True,
                 "message": f"Order {order_id} has been cancelled successfully.",
             }
         elif response.status_code == 400:
@@ -950,10 +1010,8 @@ async def cancel_order(order_id: str, reason: str = None, context: dict | None =
 async def check_product_stock(
     product_id: str, size: str = None, color: str = None, context: dict | None = None
 ) -> dict:
-    """Check product stock availability"""
     try:
-        token = context.get("auth_token") if context else None
-
+        token = (context or {}).get("auth_token")
         params = {"product_id": product_id}
         if size:
             params["size"] = size
@@ -983,8 +1041,7 @@ async def check_product_stock(
                 if not in_stock
                 else None,
             }
-        else:
-            return {"success": False, "error": "Product not found"}
+        return {"success": False, "error": "Product not found"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -995,43 +1052,40 @@ async def search_knowledge_base(query: str, context: dict | None = None) -> dict
     knowledge_base = {
         "return policy": {
             "title": "Return Policy",
-            "content": "We offer 30-day returns for most items in original condition. Electronics have a 15-day return window. Items must be unused and in original packaging. Return shipping is free for defective items but paid for customer preference returns.",
+            "content": "We offer 30-day returns for most items in original condition. Electronics have a 15-day return window. Return shipping is free for defective items.",
         },
         "shipping": {
             "title": "Shipping Information",
-            "content": "Standard shipping (5-7 business days): Free on orders over $50, $5.99 otherwise. Express shipping (2-3 business days): $15.99. Overnight shipping: $29.99. We ship to all 50 US states and select international locations.",
+            "content": "Standard shipping (5-7 business days): Free on orders over $50, $5.99 otherwise. Express (2-3 days): $15.99. Overnight: $29.99.",
         },
         "warranty": {
             "title": "Warranty Information",
-            "content": "All products come with a 1-year manufacturer warranty covering defects in materials and workmanship. This does not cover damage from misuse, accidents, or natural wear. Extended warranties (up to 3 years) are available for select items.",
+            "content": "All products come with a 1-year manufacturer warranty. Extended warranties up to 3 years available.",
         },
         "payment methods": {
             "title": "Accepted Payment Methods",
-            "content": "We accept: Credit cards (Visa, Mastercard, American Express), PayPal, Apple Pay, Google Pay, and bank transfers. All payments are processed securely with industry-standard encryption (PCI-DSS compliant).",
+            "content": "Visa, Mastercard, Amex, PayPal, Apple Pay, Google Pay, bank transfers.",
         },
         "privacy": {
             "title": "Privacy Policy",
-            "content": "We protect your personal information and do not sell it to third parties. All data is encrypted and stored securely. You can request your data or have your account deleted anytime by contacting support.",
+            "content": "We protect your personal information and do not sell it to third parties.",
         },
         "refund": {
             "title": "Refund Policy",
-            "content": "Refunds are processed within 5-7 business days after we receive your returned item. The refund amount depends on the condition of the item. Refunded items must be in original condition with all packaging.",
+            "content": "Refunds processed within 5-7 business days after item received back.",
         },
         "international shipping": {
             "title": "International Shipping",
-            "content": "We ship to 100+ countries. Shipping costs and delivery times vary by location. International orders may be subject to customs duties and taxes. Duties are the responsibility of the customer.",
+            "content": "We ship to 100+ countries. Duties are the responsibility of the customer.",
         },
     }
-
     query_lower = query.lower()
-
     for key, info in knowledge_base.items():
         if key in query_lower:
             return {"success": True, "topic": info["title"], "content": info["content"]}
-
     return {
         "success": False,
-        "message": "Policy information not found. Please contact support for more details.",
+        "message": "Policy information not found. Please contact support.",
     }
 
 
@@ -1040,11 +1094,11 @@ TOOL_EXECUTOR = {
     "cancel_order": cancel_order,
     "initiate_refund": initiate_refund,
     "check_product_stock": check_product_stock,
-    "list_orders": list_order,
-    "navigate_orders": navigate_order,
+    "list_orders": list_orders,
+    "navigate_orders": navigate_orders,
     "list_tickets": list_tickets,
     "navigate_tickets": navigate_tickets,
-    "get_order_updated": get_order_updates,
+    "get_order_updates": get_order_updates,
     "search_knowledge_base": search_knowledge_base,
     "create_ticket": create_ticket,
     "sentiment_detection": sentiment_detection,
