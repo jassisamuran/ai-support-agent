@@ -271,12 +271,7 @@ class EnterpriseAgent:
         db: AsyncSession,
         context: dict | None = None,
     ) -> dict:
-
         context = context or {}
-
-        # -----------------------------
-        # FAST NAVIGATION PATH
-        # -----------------------------
         nav_result = await handle_navigation_fast_path(
             user_message, conversation_id, context
         )
@@ -318,11 +313,9 @@ class EnterpriseAgent:
         ]
 
         tool_calls_log = []
-
         total_prompt_tokens = 0
         total_completion_tokens = 0
         total_cost = 0.0
-
         used_fallback = None
         rag_content = ""
 
@@ -350,9 +343,6 @@ class EnterpriseAgent:
             message = llm_result["message"]
             finish_reason = llm_result["finish_reason"]
 
-            # -----------------------------
-            # FINAL RESPONSE FROM LLM
-            # -----------------------------
             if finish_reason == "stop":
                 final_response = message.content
 
@@ -383,9 +373,6 @@ class EnterpriseAgent:
                     "next": ui_navigation["next"] if ui_navigation else False,
                 }
 
-            # -----------------------------
-            # TOOL CALL
-            # -----------------------------
             if finish_reason == "tool_calls" and message.tool_calls:
                 messages.append(
                     {
@@ -425,21 +412,14 @@ class EnterpriseAgent:
                                 conversation_id=conversation_id,
                                 org_id=str(org.id),
                             )
-
                         elif name in TOOL_EXECUTOR:
                             context["conversation_id"] = conversation_id
-
                             raw_result = await TOOL_EXECUTOR[name](
                                 **args,
                                 context=context,
                             )
-
                         else:
                             raw_result = {"error": f"Tool '{name}' not available."}
-
-                        # -----------------------------
-                        # DETECT PAGINATION FLAGS
-                        # -----------------------------
                         if isinstance(raw_result, dict):
                             if "next" in raw_result or "previous" in raw_result:
                                 ui_navigation = {

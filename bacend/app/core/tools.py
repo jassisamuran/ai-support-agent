@@ -708,8 +708,6 @@ async def list_tickets(
 
     async with AsyncSessionLocal() as db:
         query = select(Ticket)
-
-        # IMPORTANT: filter by user
         if auth_token:
             query = query.where(Ticket.user_id == auth_token)
 
