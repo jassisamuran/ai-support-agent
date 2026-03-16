@@ -27,7 +27,6 @@ async def fire_event(event_type: str, payload: dict, org_id: str):
         webhooks = result.scalars().all()
 
         relevant = [w for w in webhooks if event_type in w.events]
-        print("relevatnt", relevant)
         if not relevant:
             return
 
@@ -38,7 +37,6 @@ async def fire_event(event_type: str, payload: dict, org_id: str):
                 "data": payload,
             }
         )
-        print("now is", body)
         async with httpx.AsyncClient(timeout=10.0) as client:
             tasks = [
                 _deliver(client, webhook, body, event_type) for webhook in relevant

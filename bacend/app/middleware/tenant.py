@@ -26,7 +26,6 @@ async def get_current_org(
                 Organization.is_active == True,
             )
         )
-        print("now", x_api_key, result)
         org = result.scalar_one_or_none()
 
         if org:
@@ -42,7 +41,6 @@ async def get_current_org(
                 Organization.is_active == True,
             )
         )
-        print("now", x_api_key, result)
         org = result.scalar_one_or_none()
 
         if org:

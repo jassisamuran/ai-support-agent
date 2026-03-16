@@ -44,8 +44,6 @@ def create_access_token(data: dict) -> str:
 
 async def get_current_user(token=Depends(security), db: AsyncSession = Depends(get_db)):
     try:
-        print("now", token)
-        print("now", token)
         payload = jwt.decode(
             token.credentials,
             settings.SECRET_KEY,
@@ -73,8 +71,7 @@ async def get_current_user(token=Depends(security), db: AsyncSession = Depends(g
 
     if not user:
         raise HTTPException(401, "User not found")
-    print("correct now")
-    print("correct now")
+
     return user
 
 

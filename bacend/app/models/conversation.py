@@ -13,7 +13,7 @@ from sqlalchemy import (
     String,
     Text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import JSON, JSONB, UUID
 from sqlalchemy.orm import relationship
 
 
@@ -68,6 +68,7 @@ class Message(Base):
     tool_results = Column(JSONB, nullable=True)
     tokens_used = Column(Integer, default=0)
     from_cache = Column(Boolean, default=False)
+    message_metadata = Column(JSON, nullable=True)
     eval_score = Column(JSONB, nullable=True)
     created_at = Column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
