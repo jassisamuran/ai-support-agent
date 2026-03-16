@@ -31,15 +31,19 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[UUID] = None
     channel: Optional[str] = "web"
     stream: Optional[bool] = False
+    action_type: Optional[str] = "chat"
+    target_message_id: Optional[UUID] = None
 
 
 class ChatResponse(BaseModel):
     conversation_id: str
+    message_id: str
     message: str
     tool_calls_made: List[str] = []
     tokens_used: int
     cost_usd: float
     from_cache: bool
+    ui_buttons: Optional[dict] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -51,7 +55,7 @@ async def send_message(
     current_user: User = Depends(get_current_user),
     org: Organization = Depends(get_current_org),
 ):
-    await check_rate_limit(str(current_user.id))
+    # await check_rate_limit(str(current_user.id))
     user_token = http_request.headers.get("Authorization")
 
     # if not await check_billing_limit(org):
@@ -60,7 +64,12 @@ async def send_message(
     #         detail="Monthly token limit reached for your free plan",
     #         headers={"X-Error": "Token limit exceeded"},
     #     )
+    NAVIGATION_COMMANDS = {"next", "previous", "prev"}
 
+    is_navigation = (
+        request.action_type == "navigation"
+        or request.message.lower() in NAVIGATION_COMMANDS
+    )
     if request.conversation_id:
         db_result = await db.execute(
             select(Conversation).where(
@@ -110,7 +119,6 @@ async def send_message(
         return await _stream_response(
             request, conversation, history, current_user, org, db
         )
-
     result = await enterprise_agent.run(
         user_message=request.message,
         conversation_history=history,
@@ -120,6 +128,10 @@ async def send_message(
         db=db,
         context={"auth_token": user_token},
     )
+    target_message_id = None
+
+    if is_navigation and request.target_message_id:
+        target_message_id = str(request.target_message_id)
 
     db.add(
         Message(
@@ -127,27 +139,44 @@ async def send_message(
             conversation_id=conversation.id,
             role=MessageRole.USER,
             content=request.message,
+            message_metadata={
+                "type": "navigation",
+                "button": request.message.lower(),
+                "target_message_id": target_message_id,
+            }
+            if is_navigation
+            else None,
         )
     )
-    db.add(
-        Message(
-            org_id=org.id,
-            conversation_id=conversation.id,
-            role=MessageRole.ASSISTANT,
-            content=result["response"],
-            tokens_used=result["tokens_used"],
-            tool_calls=result["tool_calls"],
-            from_cache=result["from_cache"],
-        )
+    assistant_message = Message(
+        org_id=org.id,
+        conversation_id=conversation.id,
+        role=MessageRole.ASSISTANT,
+        content=result["response"],
+        tokens_used=result["tokens_used"],
+        tool_calls=result["tool_calls"],
+        from_cache=result["from_cache"],
+        message_metadata={
+            "ui_buttons": {
+                "previous": result.get("previous", False),
+                "next": result.get("next", False),
+            }
+        },
     )
+    db.add(assistant_message)
 
     await db.commit()
 
     return ChatResponse(
         conversation_id=str(conversation.id),
+        message_id=str(assistant_message.id),
         message=result["response"],
         tool_calls_made=[tc["name"] for tc in result["tool_calls"]],
         tokens_used=result["tokens_used"],
+        ui_buttons={
+            "previous": result.get("previous", ""),
+            "next": result.get("next", ""),
+        },
         cost_usd=result["cost_usd"],
         from_cache=result["from_cache"],
     )
@@ -250,8 +279,14 @@ async def latest_messages(
         "messages": [
             {
                 "role": msg.role.value,
+                "id": str(msg.id),
                 "content": msg.content,
-                "created_at": msg.created_at,
+                "type": (msg.message_metadata or {}).get("type"),
+                "button": (msg.message_metadata or {}).get("button"),
+                "ui_buttons": (msg.message_metadata or {}).get("ui_buttons"),
+                "target_message_id": (msg.message_metadata or {}).get(
+                    "target_message_id"
+                ),
             }
             for msg in messages
         ],

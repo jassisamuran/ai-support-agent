@@ -49,26 +49,40 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger()
 
-
 DEFAULT_SYSTEM_PROMPT = """
-You are a professional customer support agent for {company_name}.
-Be helpful, empathetic, concise, and accurate.
+You are a professional AI customer support assistant for {company_name}, an e-commerce platform.
 
-Capabilities:
-- Answer questions (ALWAYS search knowledge base first for policy/product questions)
-- Check order status and shipping info
-- Process refunds for eligible orders
-- Create and update support tickets
-- Escalate to human agents when needed
+Be helpful, concise, and friendly.
 
-Critical rules:
-1. ALWAYS call search_knowledge_base before answering any policy or FAQ question
-2. NEVER make up information — only state what tools return to you
-3. Check order status BEFORE processing any refund
-4. Escalate if customer uses: "furious", "lawyer", "lawsuit", "terrible", or asks for human
-5. Keep responses under 4 sentences unless a detailed explanation is truly needed
-6. Always confirm what action you took: "I have initiated your refund..."
-7. If you cannot resolve the issue after 2 tool calls, create a ticket and escalate
+When a user greets you (hi, hello, hey):
+
+Introduce yourself and list your main capabilities as bullet points.
+
+Example format:
+
+Hello! I'm your {company_name} AI assistant. I can help with:
+
+• Viewing and navigating your orders
+• Checking order status and shipping information
+• Cancelling orders
+• Initiating refunds
+• Viewing support tickets
+• Creating or managing support tickets
+• Answering policy questions (returns, shipping, warranty)
+
+Then ask how you can help.
+
+Rules:
+
+1. ALWAYS call search_knowledge_base before answering policy or FAQ questions.
+2. NEVER invent information — only use tool results.
+3. Check order status BEFORE processing a refund.
+4. Escalate to human support if the user is angry or asks for a human.
+5. Keep responses concise, but greetings may include a short bullet list of capabilities.
+6. Clearly confirm actions taken (example: "I have cancelled your order.").
+7. If the issue cannot be resolved after two tool calls, create a support ticket.
+
+Your goal is to help customers quickly resolve issues with their orders and purchases.
 """
 
 _DATA_QUERY_KEYWORDS = {
@@ -86,6 +100,9 @@ _DATA_QUERY_KEYWORDS = {
     "tracking",
     "invoice",
     "payment",
+    "hi",
+    "hello",
+    "hey",
 }
 
 
@@ -111,7 +128,6 @@ async def _detect_context_resource(conversation_id: str) -> str:
     by checking which was fetched most recently.
     Used by the navigation fast path to route "next"/"prev" correctly.
     """
-    print("converastion id", conversation_id)
     orders_state = await get_state(conversation_id, "orders")
     tickets_state = await get_state(conversation_id, "tickets")
 
@@ -163,7 +179,6 @@ async def handle_navigation_fast_path(
         )
 
     context["conversation_id"] = conversation_id
-    print("contex after", context)
     return await navigate_orders(
         direction=direction, page_number=page_num, context=context
     )
@@ -242,7 +257,6 @@ async def _get_for_org(org: Organization, db: AsyncSession) -> str:
 
     if org.system_prompt:
         return org.system_prompt.replace("{company_name}", org.company_name)
-
     return DEFAULT_SYSTEM_PROMPT.format(company_name=org.company_name)
 
 
@@ -257,31 +271,38 @@ class EnterpriseAgent:
         db: AsyncSession,
         context: dict | None = None,
     ) -> dict:
-        """
-        context = {
-            "auth_token":      "Bearer eyJ...",   ← JWT passed to Node.js
-            "conversation_id": "conv_abc123",      ← used as pagination cache key
-            "user_id":         "user_xyz",
-        }
-        """
 
+        context = context or {}
+
+        # -----------------------------
+        # FAST NAVIGATION PATH
+        # -----------------------------
         nav_result = await handle_navigation_fast_path(
-            user_message, conversation_id, context or {}
+            user_message, conversation_id, context
         )
+
         if nav_result is not None:
+            current_page = nav_result.get("page", 1)
+            total_pages = nav_result.get("total_pages", 1)
+
             resource = await _detect_context_resource(conversation_id)
+
             return {
-                "response": format_navigation_response(nav_result, resource=resource),
+                "response": format_navigation_response(nav_result, resource),
                 "tool_calls": [],
                 "tokens_used": 0,
                 "cost_usd": 0.0,
-                "from_cache": False,
+                "from_cache": True,
+                "previous": nav_result.get("previous", current_page > 1),
+                "next": nav_result.get("next", current_page < total_pages),
             }
 
+        # -----------------------------
+        # SEMANTIC CACHE
+        # -----------------------------
         if not _is_data_query(user_message):
             cached = await get_cached_response(user_message, str(org.id))
             if cached:
-                logger.info("Cache hit", similarity=cached["similarity"], org=org.slug)
                 return {
                     "response": cached["response"],
                     "tool_calls": [],
@@ -289,7 +310,6 @@ class EnterpriseAgent:
                     "cost_usd": 0.0,
                     "from_cache": True,
                 }
-
         system_prompt = await _get_for_org(org, db)
         messages = [
             {"role": "system", "content": system_prompt},
@@ -298,31 +318,41 @@ class EnterpriseAgent:
         ]
 
         tool_calls_log = []
+
         total_prompt_tokens = 0
         total_completion_tokens = 0
         total_cost = 0.0
+
         used_fallback = None
         rag_content = ""
+
+        # pagination UI state
+        ui_navigation = None
 
         _produced_paginated_result = False
 
         max_iterations = 5
-        for iteration in range(max_iterations):
-            logger.info("Agent iteration", i=iteration, org=org.slug)
 
+        for iteration in range(max_iterations):
             llm_result = await llm_service.complete(
-                messages=messages, tools=TOOL_DEFINITIONS, temperature=0.1
+                messages=messages,
+                tools=TOOL_DEFINITIONS,
+                temperature=0.1,
             )
 
             total_prompt_tokens += llm_result["prompt_tokens"]
             total_completion_tokens += llm_result["completion_tokens"]
             total_cost += llm_result["cost_usd"]
+
             if llm_result["used_fallback"]:
                 used_fallback = llm_result["used_fallback"]
 
             message = llm_result["message"]
             finish_reason = llm_result["finish_reason"]
 
+            # -----------------------------
+            # FINAL RESPONSE FROM LLM
+            # -----------------------------
             if finish_reason == "stop":
                 final_response = message.content
 
@@ -331,15 +361,6 @@ class EnterpriseAgent:
                         cache_response(user_message, final_response, str(org.id))
                     )
 
-                asyncio.create_task(
-                    self._run_evaluation(
-                        question=user_message,
-                        response=final_response,
-                        context=rag_content,
-                        conversation_id=conversation_id,
-                        org_id=str(org.id),
-                    )
-                )
                 asyncio.create_task(
                     record_usage(
                         org_id=str(org.id),
@@ -358,8 +379,13 @@ class EnterpriseAgent:
                     "cost_usd": total_cost,
                     "from_cache": False,
                     "used_fallback": used_fallback,
+                    "previous": ui_navigation["previous"] if ui_navigation else False,
+                    "next": ui_navigation["next"] if ui_navigation else False,
                 }
 
+            # -----------------------------
+            # TOOL CALL
+            # -----------------------------
             if finish_reason == "tool_calls" and message.tool_calls:
                 messages.append(
                     {
@@ -383,42 +409,55 @@ class EnterpriseAgent:
                     name = tool_call.function.name
                     args = json.loads(tool_call.function.arguments)
 
-                    logger.info("Executing tool", tool=name, org=org.slug)
-
                     if name in (
                         "list_orders",
-                        "navigate_orderss",
+                        "navigate_orders",
                         "list_tickets",
                         "navigate_tickets",
                     ):
                         _produced_paginated_result = True
 
                     try:
-                        if name in ("escalate_to_human", "create_ticket"):
-                            tool_result = json.dumps(
-                                await TOOL_EXECUTOR[name](
-                                    **args,
-                                    user_id=user_id,
-                                    conversation_id=conversation_id,
-                                    org_id=str(org.id),
-                                )
-                            )
-                        elif name in TOOL_EXECUTOR:
-                            context["conversation_id"] = conversation_id
-                            tool_result = json.dumps(
-                                await TOOL_EXECUTOR[name](**args, context=context)
-                            )
-                        else:
-                            tool_result = json.dumps(
-                                {"error": f"Tool '{name}' not available."}
+                        if name in ("create_ticket",):
+                            raw_result = await TOOL_EXECUTOR[name](
+                                **args,
+                                user_id=user_id,
+                                conversation_id=conversation_id,
+                                org_id=str(org.id),
                             )
 
+                        elif name in TOOL_EXECUTOR:
+                            context["conversation_id"] = conversation_id
+
+                            raw_result = await TOOL_EXECUTOR[name](
+                                **args,
+                                context=context,
+                            )
+
+                        else:
+                            raw_result = {"error": f"Tool '{name}' not available."}
+
+                        # -----------------------------
+                        # DETECT PAGINATION FLAGS
+                        # -----------------------------
+                        if isinstance(raw_result, dict):
+                            if "next" in raw_result or "previous" in raw_result:
+                                ui_navigation = {
+                                    "next": raw_result.get("next", False),
+                                    "previous": raw_result.get("previous", False),
+                                }
+
+                        tool_result = json.dumps(raw_result)
+
                     except Exception as e:
-                        logger.error("Tool failed", tool=name, error=str(e))
                         tool_result = json.dumps({"error": str(e)})
 
                     tool_calls_log.append(
-                        {"name": name, "args": args, "result": tool_result[:500]}
+                        {
+                            "name": name,
+                            "args": args,
+                            "result": tool_result[:500],
+                        }
                     )
 
                     messages.append(
@@ -429,16 +468,8 @@ class EnterpriseAgent:
                         }
                     )
 
-        logger.warning(
-            "Max iterations reached",
-            org=org.slug,
-            conversation_id=conversation_id,
-        )
         return {
-            "response": (
-                "I'm having trouble processing your request. "
-                "A ticket has been created and a human agent will follow up."
-            ),
+            "response": "Something went wrong. Please try again.",
             "tool_calls": tool_calls_log,
             "tokens_used": total_prompt_tokens + total_completion_tokens,
             "cost_usd": total_cost,

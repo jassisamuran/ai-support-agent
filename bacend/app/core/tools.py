@@ -2,8 +2,6 @@ import asyncio
 import json
 
 import httpx
-from sqlalchemy import select
-
 from app.core.pagination_cache import (
     CACHE_TTL,
     PAGE_SIZE,
@@ -18,6 +16,7 @@ from app.core.pagination_cache import (
 )
 from app.database import AsyncSessionLocal, settings
 from app.models.ticket import Ticket, TicketPriority
+from sqlalchemy import select
 
 TOOL_DEFINITIONS = [
     {
@@ -458,6 +457,8 @@ async def _build_page_response(state: PaginationState) -> dict:
         "formatted_lines": lines,
         "navigation_hints": nav_parts,
         "boundary_messages": boundary_msgs,
+        "previous": state.has_previous,
+        "next": state.has_next,
         "has_next": state.has_next,
         "has_previous": state.has_previous,
     }
@@ -582,7 +583,6 @@ async def navigate_orders(
     """Navigate cached order list. Does NOT call the API."""
     conversation_id = (context or {}).get("conversation_id", "default")
     state = await get_state(conversation_id, "orders")
-    print("check now ", state)
 
     if state is None:
         return {
@@ -704,12 +704,20 @@ async def list_tickets(
     context: dict | None = None,
 ) -> dict:
     conversation_id = (context or {}).get("conversation_id", "default")
+    auth_token = (context or {}).get("auth_token", "")
 
     async with AsyncSessionLocal() as db:
         query = select(Ticket)
+
+        # IMPORTANT: filter by user
+        if auth_token:
+            query = query.where(Ticket.user_id == auth_token)
+
         if status_filter != "all":
             query = query.where(Ticket.status == status_filter)
-        query = query.limit(limit).order_by(Ticket.created_at.desc())
+
+        query = query.order_by(Ticket.created_at.desc()).limit(limit)
+
         results = await db.execute(query)
         tickets = results.scalars().all()
 

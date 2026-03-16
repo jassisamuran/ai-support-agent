@@ -18,7 +18,6 @@ def _sign_payload(payload: str, secret: str) -> str:
 
 
 async def fire_event(event_type: str, payload: dict, org_id: str):
-    print("here")
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(Webhook).where(Webhook.org_id == org_id, Webhook.is_active == True)
