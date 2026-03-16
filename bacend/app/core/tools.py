@@ -546,7 +546,7 @@ async def list_orders(
 
         data = response.json()
         orders = data.get("orders", data) if isinstance(data, dict) else data
-        print("data is", orders)
+
         if not orders:
             return {
                 "success": True,

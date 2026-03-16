@@ -181,7 +181,6 @@ async def send_message(
             else None,
         )
     )
-
     assistant_message = Message(
         org_id=org.id,
         conversation_id=conversation.id,
