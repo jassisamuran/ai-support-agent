@@ -9,7 +9,12 @@ from app.database import get_db, settings
 from app.middleware.auth import get_current_user
 from app.middleware.rate_limit import check_rate_limit
 from app.middleware.tenant import get_current_org
-from app.models.conversation import Conversation, Message, MessageRole
+from app.models.conversation import (
+    Conversation,
+    ConversationStatus,
+    Message,
+    MessageRole,
+)
 from app.models.organization import Organization
 from app.models.user import User
 from app.services.billing_service import check_billing_limit
@@ -45,6 +50,30 @@ class ChatResponse(BaseModel):
     from_cache: bool
     ui_buttons: Optional[dict] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+@router.post("/session")
+async def create_chat_session(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+    org: Organization = Depends(get_current_org),
+):
+    conversation = Conversation(
+        org_id=org.id,
+        user_id=user.id,
+        status=ConversationStatus.ACTIVE,
+        channel="web",
+    )
+
+    db.add(conversation)
+    await db.commit()
+    await db.refresh(conversation)
+
+    return {
+        "conversation_id": str(conversation.id),
+        "status": conversation.status,
+        "created_at": conversation.created_at,
+    }
 
 
 @router.post("/message", response_model=ChatResponse)

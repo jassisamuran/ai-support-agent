@@ -8,6 +8,14 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
 
+class TicketCategory(str, enum.Enum):
+    ORDER = "order"
+    ACCOUNT = "account"
+    PAYMENT = "payment"
+    SHIPPING = "shipping"
+    GENERAL = "general"
+
+
 class TicketStatus(str, enum.Enum):
     OPEN = "open"
     IN_PROGRESS = "in_progress"
@@ -32,6 +40,8 @@ class Ticket(Base):
         UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=True
     )
     title = Column(String, nullable=False)
+    order_id = Column(UUID(as_uuid=True), nullable=True)
+    category = Column(Enum(TicketCategory), default=TicketCategory.GENERAL)
     description = Column(Text)
     status = Column(Enum(TicketStatus), default=TicketStatus.OPEN)
     priority = Column(Enum(TicketPriority), default=TicketPriority.MEDIUM)
@@ -43,6 +53,5 @@ class Ticket(Base):
     updated_at = Column(
         DateTime(timezone=True), onupdate=lambda: datetime.now(timezone.utc)
     )
-
     user = relationship("User", foreign_keys=[user_id], back_populates="tickets")
     conversation = relationship("Conversation", back_populates="ticket")
