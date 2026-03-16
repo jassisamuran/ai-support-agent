@@ -18,7 +18,6 @@ def _sign_payload(payload: str, secret: str) -> str:
 
 
 async def fire_event(event_type: str, payload: dict, org_id: str):
-    print("here")
     async with AsyncSessionLocal() as db:
         result = await db.execute(
             select(Webhook).where(Webhook.org_id == org_id, Webhook.is_active == True)
@@ -27,7 +26,6 @@ async def fire_event(event_type: str, payload: dict, org_id: str):
         webhooks = result.scalars().all()
 
         relevant = [w for w in webhooks if event_type in w.events]
-        print("relevatnt", relevant)
         if not relevant:
             return
 
@@ -38,7 +36,6 @@ async def fire_event(event_type: str, payload: dict, org_id: str):
                 "data": payload,
             }
         )
-        print("now is", body)
         async with httpx.AsyncClient(timeout=10.0) as client:
             tasks = [
                 _deliver(client, webhook, body, event_type) for webhook in relevant
