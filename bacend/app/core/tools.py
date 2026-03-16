@@ -149,11 +149,12 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "order_id": {"type": "string"},
                     "title": {"type": "string"},
                     "description": {"type": "string"},
                     "priority": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
                 },
-                "required": ["title", "description", "priority"],
+                "required": ["order_id", "title", "description", "priority"],
             },
         },
     },
@@ -545,7 +546,7 @@ async def list_orders(
 
         data = response.json()
         orders = data.get("orders", data) if isinstance(data, dict) else data
-
+        print("data is", orders)
         if not orders:
             return {
                 "success": True,
@@ -944,27 +945,36 @@ async def create_ticket(
     title: str,
     description: str,
     priority: str,
+    order_id: str = None,
     user_id: str = None,
     conversation_id: str = None,
-    org_id: str = None,
-) -> dict:
-
+):
     async with AsyncSessionLocal() as db:
-        if conversation_id:
+        try:
             result = await db.execute(
-                select(Ticket).where(Ticket.conversation_id == conversation_id)
+                select(Ticket).where(
+                    Ticket.user_id == user_id,
+                    Ticket.order_id == order_id,
+                )
             )
-            existing_ticket = result.scalar_one_or_none()
+        except Exception as e:
+            print("DB ERROR:", e)
+            return {"error": "Database query failed"}
 
-            if existing_ticket:
-                return {
-                    "ticket_id": str(existing_ticket.id),
-                    "message": "A support ticket already exists for this issue.",
-                }
+        existing_ticket = result.scalar_one_or_none()
+
+        if existing_ticket:
+            return {
+                "ticket_id": str(existing_ticket.id),
+                "message": f"A ticket already exists for order #{order_id}.",
+                "close_chat": True,
+                "continue_chat": True,
+            }
 
         ticket = Ticket(
             user_id=user_id,
             conversation_id=conversation_id,
+            order_id=order_id,
             title=title,
             description=description,
             priority=TicketPriority(priority.lower()),
@@ -974,7 +984,12 @@ async def create_ticket(
         await db.commit()
         await db.refresh(ticket)
 
-    return {"ticket_id": str(ticket.id), "message": f"Ticket created: {title}"}
+    return {
+        "ticket_id": str(ticket.id),
+        "message": f"Ticket created for order #{order_id}",
+        "close_chat": True,
+        "continue_chat": True,
+    }
 
 
 async def initiate_refund(

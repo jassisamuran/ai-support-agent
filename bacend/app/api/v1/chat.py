@@ -22,13 +22,17 @@ from app.services.llm_service import llm_service
 from app.services.webhook_service import fire_event
 from arq import create_pool
 from arq.connections import RedisSettings
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
+
+
+class ConversationRequest(BaseModel):
+    conversation_id: Optional[str] = None
 
 
 class ChatRequest(BaseModel):
@@ -177,6 +181,7 @@ async def send_message(
             else None,
         )
     )
+
     assistant_message = Message(
         org_id=org.id,
         conversation_id=conversation.id,
@@ -189,6 +194,8 @@ async def send_message(
             "ui_buttons": {
                 "previous": result.get("previous", False),
                 "next": result.get("next", False),
+                "close_chat": result.get("close_chat", False),
+                "continue_chat": result.get("continue_chat", False),
             }
         },
     )
@@ -205,6 +212,8 @@ async def send_message(
         ui_buttons={
             "previous": result.get("previous", ""),
             "next": result.get("next", ""),
+            "close_chat": result.get("close_chat", ""),
+            "continue_chat": result.get("continue_chat", ""),
         },
         cost_usd=result["cost_usd"],
         from_cache=result["from_cache"],
@@ -274,37 +283,26 @@ async def _stream_response(request, conversation, history, current_user, org, db
 
 @router.get("/latest-messages")
 async def latest_messages(
+    conversation_id: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
     org: Organization = Depends(get_current_org),
 ):
 
-    result = await db.execute(
-        select(Conversation)
-        .where(
-            Conversation.user_id == current_user.id,
-            Conversation.org_id == org.id,
-        )
-        .order_by(Conversation.created_at.desc())
-        .limit(1)
-    )
-
-    conversation = result.scalar_one_or_none()
-
-    if not conversation:
+    if not conversation_id:
         return {"conversation_id": None, "messages": []}
 
-    result = await db.execute(
+    stmt = (
         select(Message)
-        .where(Message.conversation_id == conversation.id)
-        .order_by(Message.created_at.desc())
-        .limit(20)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at)
     )
 
-    messages = list(reversed(result.scalars().all()))
+    result = await db.execute(stmt)
+    messages = result.scalars().all()
 
     return {
-        "conversation_id": str(conversation.id),
+        "conversation_id": conversation_id,
         "messages": [
             {
                 "role": msg.role.value,

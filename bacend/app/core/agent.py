@@ -69,6 +69,9 @@ Hello! I'm your {company_name} AI assistant. I can help with:
 • Viewing support tickets
 • Creating or managing support tickets
 • Answering policy questions (returns, shipping, warranty)
+• Never render images or markdown image links.
+• If tool responses contain image URLs, ignore them.
+• Only show text information about orders.
 
 Then ask how you can help.
 
@@ -81,6 +84,7 @@ Rules:
 5. Keep responses concise, but greetings may include a short bullet list of capabilities.
 6. Clearly confirm actions taken (example: "I have cancelled your order.").
 7. If the issue cannot be resolved after two tool calls, create a support ticket.
+8. Never create more than one ticket for the same order. If a ticket already exists, inform the user instead of creating a new one.
 
 Your goal is to help customers quickly resolve issues with their orders and purchases.
 """
@@ -371,6 +375,12 @@ class EnterpriseAgent:
                     "used_fallback": used_fallback,
                     "previous": ui_navigation["previous"] if ui_navigation else False,
                     "next": ui_navigation["next"] if ui_navigation else False,
+                    "close_chat": ui_navigation["close_chat"]
+                    if ui_navigation
+                    else False,
+                    "continue_chat": ui_navigation["continue_chat"]
+                    if ui_navigation
+                    else False,
                 }
 
             if finish_reason == "tool_calls" and message.tool_calls:
@@ -410,7 +420,6 @@ class EnterpriseAgent:
                                 **args,
                                 user_id=user_id,
                                 conversation_id=conversation_id,
-                                org_id=str(org.id),
                             )
                         elif name in TOOL_EXECUTOR:
                             context["conversation_id"] = conversation_id
@@ -421,10 +430,22 @@ class EnterpriseAgent:
                         else:
                             raw_result = {"error": f"Tool '{name}' not available."}
                         if isinstance(raw_result, dict):
-                            if "next" in raw_result or "previous" in raw_result:
+                            if any(
+                                k in raw_result
+                                for k in [
+                                    "next",
+                                    "previous",
+                                    "close_chat",
+                                    "continue_chat",
+                                ]
+                            ):
                                 ui_navigation = {
                                     "next": raw_result.get("next", False),
                                     "previous": raw_result.get("previous", False),
+                                    "continue_chat": raw_result.get(
+                                        "continue_chat", False
+                                    ),
+                                    "close_chat": raw_result.get("close_chat", False),
                                 }
 
                         tool_result = json.dumps(raw_result)

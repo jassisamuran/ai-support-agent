@@ -3,7 +3,14 @@ import uuid
 from datetime import datetime, timezone
 
 from app.database import Base
-from sqlalchemy import Column, DateTime, Enum, ForeignKey, String, Text
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Enum,
+    ForeignKey,
+    String,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -40,7 +47,7 @@ class Ticket(Base):
         UUID(as_uuid=True), ForeignKey("conversations.id"), nullable=True
     )
     title = Column(String, nullable=False)
-    order_id = Column(UUID(as_uuid=True), nullable=True)
+    order_id = Column(String, nullable=True)
     category = Column(Enum(TicketCategory), default=TicketCategory.GENERAL)
     description = Column(Text)
     status = Column(Enum(TicketStatus), default=TicketStatus.OPEN)
