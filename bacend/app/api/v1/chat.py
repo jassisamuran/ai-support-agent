@@ -44,15 +44,59 @@ class ChatRequest(BaseModel):
     target_message_id: Optional[UUID] = None
 
 
+class PaginationInfo(BaseModel):
+    page: int
+    total_pages: int
+    total_items: int
+    next: bool
+    previous: bool
+    showing: Optional[str] = None
+
+
+class UIBlock(BaseModel):
+    """
+    Present only when the agent returns a paginated resource (orders / tickets).
+
+    Shape:
+    {
+        "type": "orders",
+        "data": [...],
+        "pagination": { "page": 1, "next": true, "previous": false, ... }
+    }
+    """
+
+    type: str
+    data: List[dict]
+    pagination: PaginationInfo
+
+
 class ChatResponse(BaseModel):
+    """
+    Unified response shape returned by POST /message.
+
+    For plain-text answers:
+        { "message": "...", "ui": null, ... }
+
+    For paginated results (orders / tickets):
+        {
+            "message": "Found 50 orders. Showing page 1.",
+            "ui": {
+                "type": "orders",
+                "data": [...],
+                "pagination": { "page": 1, "next": true, "previous": false }
+            },
+            ...
+        }
+    """
+
     conversation_id: str
     message_id: str
     message: str
+    ui: Optional[UIBlock] = None  # ← the key addition
     tool_calls_made: List[str] = []
     tokens_used: int
     cost_usd: float
     from_cache: bool
-    ui_buttons: Optional[dict] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -147,7 +191,6 @@ async def send_message(
         for msg in past_messages
         if msg.role in (MessageRole.USER, MessageRole.ASSISTANT)
     ]
-
     if request.stream:
         return await _stream_response(
             request, conversation, history, current_user, org, db
@@ -161,10 +204,16 @@ async def send_message(
         db=db,
         context={"auth_token": user_token},
     )
-    target_message_id = None
 
-    if is_navigation and request.target_message_id:
-        target_message_id = str(request.target_message_id)
+    agent_message: str = result["message"]
+    agent_ui: Optional[dict] = result.get("ui")
+    tool_calls: list = result.get("tool_calls", [])
+
+    target_message_id = (
+        str(request.target_message_id)
+        if is_navigation and request.target_message_id
+        else None
+    )
 
     db.add(
         Message(
@@ -172,57 +221,54 @@ async def send_message(
             conversation_id=conversation.id,
             role=MessageRole.USER,
             content=request.message,
-            message_metadata={
-                "type": "navigation",
-                "button": request.message.lower(),
-                "target_message_id": target_message_id,
-            }
-            if is_navigation
-            else None,
+            message_metadata=(
+                {
+                    "type": "navigation",
+                    "button": request.message.lower(),
+                    "target_message_id": target_message_id,
+                }
+                if is_navigation
+                else None
+            ),
         )
     )
+
     assistant_message = Message(
         org_id=org.id,
         conversation_id=conversation.id,
         role=MessageRole.ASSISTANT,
-        content=result["response"],
-        tokens_used=result["tokens_used"],
-        tool_calls=result["tool_calls"],
-        from_cache=result["from_cache"],
-        message_metadata={
-            "ui_buttons": {
-                "previous": result.get("previous", False),
-                "next": result.get("next", False),
-                "close_chat": result.get("close_chat", False),
-                "continue_chat": result.get("continue_chat", False),
-            }
-        },
+        content=agent_message,
+        tokens_used=result.get("tokens_used", 0),
+        tool_calls=tool_calls,
+        from_cache=result.get("from_cache", False),
+        message_metadata={"ui": agent_ui} if agent_ui else None,
     )
     db.add(assistant_message)
-
     await db.commit()
 
+    ui_block: Optional[UIBlock] = None
+    if agent_ui:
+        ui_block = UIBlock(
+            type=agent_ui["type"],
+            data=agent_ui.get("data", []),
+            pagination=PaginationInfo(**agent_ui["pagination"]),
+        )
     return ChatResponse(
         conversation_id=str(conversation.id),
         message_id=str(assistant_message.id),
-        message=result["response"],
-        tool_calls_made=[tc["name"] for tc in result["tool_calls"]],
-        tokens_used=result["tokens_used"],
-        ui_buttons={
-            "previous": result.get("previous", ""),
-            "next": result.get("next", ""),
-            "close_chat": result.get("close_chat", ""),
-            "continue_chat": result.get("continue_chat", ""),
-        },
-        cost_usd=result["cost_usd"],
-        from_cache=result["from_cache"],
+        message=agent_message,
+        ui=ui_block,
+        tool_calls_made=[tc["name"] for tc in tool_calls],
+        tokens_used=result.get("tokens_used", 0),
+        cost_usd=result.get("cost_usd", 0.0),
+        from_cache=result.get("from_cache", False),
     )
 
 
 async def _stream_response(request, conversation, history, current_user, org, db):
     """
     Server-Sent Events streaming.
-    Frontend receiving tokens one by one - like chatgpt typing effects
+    Frontend receives tokens one by one — like ChatGPT typing effects.
     """
     from app.services.llm_service import llm_service
 
@@ -304,12 +350,12 @@ async def latest_messages(
         "conversation_id": conversation_id,
         "messages": [
             {
-                "role": msg.role.value,
                 "id": str(msg.id),
+                "role": msg.role.value,
                 "content": msg.content,
+                "ui": (msg.message_metadata or {}).get("ui"),
                 "type": (msg.message_metadata or {}).get("type"),
                 "button": (msg.message_metadata or {}).get("button"),
-                "ui_buttons": (msg.message_metadata or {}).get("ui_buttons"),
                 "target_message_id": (msg.message_metadata or {}).get(
                     "target_message_id"
                 ),
