@@ -1,9 +1,7 @@
 """
 agent.py — FULLY ANNOTATED
 ===========================
-
 COMPLETE FLOW when user types: "show my orders for last 5 months"
-
 STEP 1  → handle_navigation_fast_path()         — not navigation, returns None
 STEP 2  → _is_data_query() check                — skips semantic cache (user-specific data)
 STEP 3  → LLM call with TOOL_DEFINITIONS        — LLM decides to call list_orders
@@ -19,6 +17,20 @@ THEN when user types "next":
 STEP A  → handle_navigation_fast_path()         — detected as NEXT intent
 STEP B  → navigate_orders()                      — reads from pagination cache, NO API call
 STEP C  → returns page 2 (orders 6-10)          — zero LLM calls, zero API calls
+
+UNIFIED RESPONSE SHAPE (all paths):
+{
+    "message": "Found 50 orders. Showing page 1.",   # always present
+    "ui": {                                           # present only for orders/tickets
+        "type": "orders",
+        "data": [...],
+        "pagination": {"page": 1, "next": True, "previous": False}
+    },
+    "tool_calls": [...],
+    "tokens_used": 0,
+    "cost_usd": 0.0,
+    "from_cache": False,
+}
 """
 
 import asyncio
@@ -87,6 +99,24 @@ Rules:
 8. Never create more than one ticket for the same order. If a ticket already exists, inform the user instead of creating a new one.
 
 Your goal is to help customers quickly resolve issues with their orders and purchases.
+
+IMPORTANT:
+For any user-specific request about orders, tickets, refunds, cancellations, stock, tracking,
+or account data, you MUST use the appropriate tool and MUST NOT answer from general reasoning.
+
+Order rules:
+- If the user asks to show, list, view, or browse orders, always call list_orders first.
+- If the user asks for next, previous, refresh, first, last, or a page number for orders, use navigate_orders.
+- If the user asks about one specific order, use check_order_status.
+
+Ticket rules:
+- If the user asks to show, list, or view tickets, use list_tickets.
+- If the user asks for next, previous, refresh, first, last, or a page number for tickets, use navigate_tickets.
+
+Policy rules:
+- Always call search_knowledge_base before answering policy or FAQ questions.
+
+Never fabricate order, ticket, refund, stock, or tracking information.
 """
 
 _DATA_QUERY_KEYWORDS = {
@@ -156,10 +186,10 @@ async def handle_navigation_fast_path(
 
     Checks if the message is purely a navigation command.
     If yes: handles it entirely without calling the LLM.
-    If no: returns None so the main loop continues.
+    If no:  returns None so the main loop continues.
 
     For "show my orders for last 5 months" → returns None (not navigation).
-    For "next" after orders are loaded → returns page 2 from pagination cache.
+    For "next" after orders are loaded     → returns page 2 from pagination cache.
     """
     intent, page_num = parse_navigation_intent(message)
     if intent is None:
@@ -233,6 +263,30 @@ def format_navigation_response(result: dict, resource: str = "orders") -> str:
     return "\n".join(lines).strip()
 
 
+def _build_ui_block(raw_result: dict, resource: str) -> dict:
+    """
+    Build the standard ui block that every paginated response carries.
+
+    Args:
+        raw_result: the dict returned by list_orders / navigate_orders /
+                    list_tickets / navigate_tickets
+        resource:   "orders" or "tickets"
+    """
+    data_key = resource
+    return {
+        "type": resource,
+        "data": raw_result.get(data_key, []),
+        "pagination": {
+            "page": raw_result.get("page", 1),
+            "total_pages": raw_result.get("total_pages", 1),
+            "total_items": raw_result.get("total_items", 0),
+            "next": raw_result.get("next", False),
+            "previous": raw_result.get("previous", False),
+            "showing": raw_result.get("showing"),
+        },
+    }
+
+
 async def _get_for_org(org: Organization, db: AsyncSession) -> str:
     """
     Load the correct system prompt for this org.
@@ -264,6 +318,72 @@ async def _get_for_org(org: Organization, db: AsyncSession) -> str:
     return DEFAULT_SYSTEM_PROMPT.format(company_name=org.company_name)
 
 
+def _paginated_response(
+    raw_result: dict,
+    resource: str,
+    tool_calls_log: list,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cost_usd: float,
+    from_cache: bool = False,
+) -> dict:
+    """
+    Return the unified response dict for any paginated resource (orders / tickets).
+
+    Shape:
+    {
+        "message": "...",
+        "ui": {
+            "type": "orders",
+            "data": [...],
+            "pagination": {"page": 1, "next": True, "previous": False, ...}
+        },
+        "tool_calls": [...],
+        "tokens_used": N,
+        "cost_usd": 0.0,
+        "from_cache": False,
+    }
+    """
+    return {
+        "message": raw_result.get("message", f"Here are your {resource}."),
+        "ui": _build_ui_block(raw_result, resource),
+        "tool_calls": tool_calls_log,
+        "tokens_used": prompt_tokens + completion_tokens,
+        "cost_usd": cost_usd,
+        "from_cache": from_cache,
+    }
+
+
+def _text_response(
+    text: str,
+    tool_calls_log: list,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cost_usd: float,
+    from_cache: bool = False,
+    used_fallback=None,
+) -> dict:
+    """
+    Return the unified response dict for plain-text (non-paginated) answers.
+
+    Shape:
+    {
+        "message": "...",
+        "ui": None,
+        ...
+    }
+    """
+    return {
+        "message": text,
+        "ui": None,
+        "tool_calls": tool_calls_log,
+        "tokens_used": prompt_tokens + completion_tokens,
+        "cost_usd": cost_usd,
+        "from_cache": from_cache,
+        "used_fallback": used_fallback,
+    }
+
+
 class EnterpriseAgent:
     async def run(
         self,
@@ -281,34 +401,30 @@ class EnterpriseAgent:
         )
 
         if nav_result is not None:
-            current_page = nav_result.get("page", 1)
-            total_pages = nav_result.get("total_pages", 1)
-
             resource = await _detect_context_resource(conversation_id)
+            logger.debug("navigation fast path", resource=resource, result=nav_result)
+            return _paginated_response(
+                raw_result=nav_result,
+                resource=resource,
+                tool_calls_log=[],
+                prompt_tokens=0,
+                completion_tokens=0,
+                cost_usd=0.0,
+                from_cache=True,
+            )
 
-            return {
-                "response": format_navigation_response(nav_result, resource),
-                "tool_calls": [],
-                "tokens_used": 0,
-                "cost_usd": 0.0,
-                "from_cache": True,
-                "previous": nav_result.get("previous", current_page > 1),
-                "next": nav_result.get("next", current_page < total_pages),
-            }
-
-        # -----------------------------
-        # SEMANTIC CACHE
-        # -----------------------------
         if not _is_data_query(user_message):
             cached = await get_cached_response(user_message, str(org.id))
             if cached:
-                return {
-                    "response": cached["response"],
-                    "tool_calls": [],
-                    "tokens_used": 0,
-                    "cost_usd": 0.0,
-                    "from_cache": True,
-                }
+                return _text_response(
+                    text=cached["response"],
+                    tool_calls_log=[],
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    cost_usd=0.0,
+                    from_cache=True,
+                )
+
         system_prompt = await _get_for_org(org, db)
         messages = [
             {"role": "system", "content": system_prompt},
@@ -316,20 +432,14 @@ class EnterpriseAgent:
             {"role": "user", "content": user_message},
         ]
 
-        tool_calls_log = []
+        tool_calls_log: list = []
         total_prompt_tokens = 0
         total_completion_tokens = 0
         total_cost = 0.0
         used_fallback = None
-        rag_content = ""
-
-        # pagination UI state
-        ui_navigation = None
-
         _produced_paginated_result = False
 
         max_iterations = 5
-
         for iteration in range(max_iterations):
             llm_result = await llm_service.complete(
                 messages=messages,
@@ -346,6 +456,10 @@ class EnterpriseAgent:
 
             message = llm_result["message"]
             finish_reason = llm_result["finish_reason"]
+
+            logger.debug(
+                "llm iteration", iteration=iteration, finish_reason=finish_reason
+            )
 
             if finish_reason == "stop":
                 final_response = message.content
@@ -366,22 +480,15 @@ class EnterpriseAgent:
                     )
                 )
 
-                return {
-                    "response": final_response,
-                    "tool_calls": tool_calls_log,
-                    "tokens_used": total_prompt_tokens + total_completion_tokens,
-                    "cost_usd": total_cost,
-                    "from_cache": False,
-                    "used_fallback": used_fallback,
-                    "previous": ui_navigation["previous"] if ui_navigation else False,
-                    "next": ui_navigation["next"] if ui_navigation else False,
-                    "close_chat": ui_navigation["close_chat"]
-                    if ui_navigation
-                    else False,
-                    "continue_chat": ui_navigation["continue_chat"]
-                    if ui_navigation
-                    else False,
-                }
+                return _text_response(
+                    text=final_response,
+                    tool_calls_log=tool_calls_log,
+                    prompt_tokens=total_prompt_tokens,
+                    completion_tokens=total_completion_tokens,
+                    cost_usd=total_cost,
+                    from_cache=False,
+                    used_fallback=used_fallback,
+                )
 
             if finish_reason == "tool_calls" and message.tool_calls:
                 messages.append(
@@ -429,24 +536,62 @@ class EnterpriseAgent:
                             )
                         else:
                             raw_result = {"error": f"Tool '{name}' not available."}
-                        if isinstance(raw_result, dict):
-                            if any(
-                                k in raw_result
-                                for k in [
-                                    "next",
-                                    "previous",
-                                    "close_chat",
-                                    "continue_chat",
-                                ]
-                            ):
-                                ui_navigation = {
-                                    "next": raw_result.get("next", False),
-                                    "previous": raw_result.get("previous", False),
-                                    "continue_chat": raw_result.get(
-                                        "continue_chat", False
-                                    ),
-                                    "close_chat": raw_result.get("close_chat", False),
-                                }
+
+                        if name in ("list_orders", "navigate_orders"):
+                            asyncio.create_task(
+                                record_usage(
+                                    org_id=str(org.id),
+                                    model=llm_result["model"],
+                                    prompt_tokens=total_prompt_tokens,
+                                    completion_tokens=total_completion_tokens,
+                                    cost_usd=total_cost,
+                                    conversation_id=conversation_id,
+                                )
+                            )
+                            return _paginated_response(
+                                raw_result=raw_result,
+                                resource="orders",
+                                tool_calls_log=tool_calls_log
+                                + [
+                                    {
+                                        "name": name,
+                                        "args": args,
+                                        "result": str(raw_result)[:500],
+                                    }
+                                ],
+                                prompt_tokens=total_prompt_tokens,
+                                completion_tokens=total_completion_tokens,
+                                cost_usd=total_cost,
+                                from_cache=False,
+                            )
+
+                        if name in ("list_tickets", "navigate_tickets"):
+                            asyncio.create_task(
+                                record_usage(
+                                    org_id=str(org.id),
+                                    model=llm_result["model"],
+                                    prompt_tokens=total_prompt_tokens,
+                                    completion_tokens=total_completion_tokens,
+                                    cost_usd=total_cost,
+                                    conversation_id=conversation_id,
+                                )
+                            )
+                            return _paginated_response(
+                                raw_result=raw_result,
+                                resource="tickets",
+                                tool_calls_log=tool_calls_log
+                                + [
+                                    {
+                                        "name": name,
+                                        "args": args,
+                                        "result": str(raw_result)[:500],
+                                    }
+                                ],
+                                prompt_tokens=total_prompt_tokens,
+                                completion_tokens=total_completion_tokens,
+                                cost_usd=total_cost,
+                                from_cache=False,
+                            )
 
                         tool_result = json.dumps(raw_result)
 
@@ -469,13 +614,14 @@ class EnterpriseAgent:
                         }
                     )
 
-        return {
-            "response": "Something went wrong. Please try again.",
-            "tool_calls": tool_calls_log,
-            "tokens_used": total_prompt_tokens + total_completion_tokens,
-            "cost_usd": total_cost,
-            "from_cache": False,
-        }
+        return _text_response(
+            text="Something went wrong. Please try again.",
+            tool_calls_log=tool_calls_log,
+            prompt_tokens=total_prompt_tokens,
+            completion_tokens=total_completion_tokens,
+            cost_usd=total_cost,
+            from_cache=False,
+        )
 
     async def _run_evaluation(
         self,
