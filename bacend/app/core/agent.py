@@ -139,6 +139,68 @@ _DATA_QUERY_KEYWORDS = {
     "hey",
 }
 
+_GREETING_KEYWORDS = {
+    "hi",
+    "hello",
+    "hey",
+    "hii",
+    "helo",
+    "good morning",
+    "good afternoon",
+    "good evening",
+}
+
+
+def _is_greeting(message: str) -> bool:
+    msg = message.strip().lower()
+    return msg in _GREETING_KEYWORDS
+
+
+async def handle_greeting_fast_path(
+    message: str,
+    conversation_id: str,
+    company_name: str,
+    context: dict,
+):
+    if not _is_greeting(message):
+        return None
+
+    greeting_count = context.get("greeting_count", 0) + 1
+    context["greeting_count"] = greeting_count
+
+    if greeting_count == 1:
+        return {
+            "message": (
+                f"Hello! I'm your {company_name} AI assistant. "
+                f"I can help with orders, refunds, support tickets, and policy questions. "
+                f"How can I assist you today?"
+            ),
+            "ui": None,
+            "tool_calls": [],
+            "tokens_used": 0,
+            "cost_usd": 0.0,
+            "from_cache": True,
+        }
+
+    if greeting_count <= 3:
+        return {
+            "message": "Hi again! How can I help you today?",
+            "ui": None,
+            "tool_calls": [],
+            "tokens_used": 0,
+            "cost_usd": 0.0,
+            "from_cache": True,
+        }
+
+    return {
+        "message": "Hello! What can I help you with today?",
+        "ui": None,
+        "tool_calls": [],
+        "tokens_used": 0,
+        "cost_usd": 0.0,
+        "from_cache": True,
+    }
+
 
 def _is_data_query(message: str) -> bool:
     """
@@ -207,12 +269,13 @@ async def handle_navigation_fast_path(
     }
     direction = direction_map[intent]
 
+    context["conversation_id"] = conversation_id
+
     if resource == "tickets":
         return await navigate_tickets(
             direction=direction, page_number=page_num, context=context
         )
 
-    context["conversation_id"] = conversation_id
     return await navigate_orders(
         direction=direction, page_number=page_num, context=context
     )
@@ -396,6 +459,16 @@ class EnterpriseAgent:
         context: dict | None = None,
     ) -> dict:
         context = context or {}
+
+        greeting_result = await handle_greeting_fast_path(
+            user_message,
+            conversation_id,
+            "Proshop",
+            context,
+        )
+        if greeting_result is not None:
+            return greeting_result
+
         nav_result = await handle_navigation_fast_path(
             user_message, conversation_id, context
         )
