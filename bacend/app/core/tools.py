@@ -370,6 +370,20 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_ticket_details",
+            "description": "Get details for one support ticket by ticket ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticket_id": {"type": "string", "description": "The ticket ID"}
+                },
+                "required": ["ticket_id"],
+            },
+        },
+    },
 ]
 
 PERIOD_DAYS = {
@@ -412,49 +426,61 @@ def _format_order_card(order: dict, index: int, stale: bool = False) -> str:
     )
 
 
-async def _build_page_response(state: PaginationState) -> dict:
+async def _build_page_response(
+    state: PaginationState,
+    resource: str = "orders",
+) -> dict:
     items = state.current_items
     start_index = (state.current_page - 1) * state.page_size + 1
     stale_ids = state.stale_ids
 
     lines = []
-    for i, order in enumerate(items):
-        oid = order.get("id") or order.get("order_id", "")
-        is_stale = oid in stale_ids
-
-        lines.append(_format_order_card(order, start_index + i, stale=is_stale))
+    for i, item in enumerate(items):
+        if resource == "orders":
+            oid = item.get("id") or item.get("order_id", "")
+            is_stale = oid in stale_ids
+            lines.append(_format_order_card(item, start_index + i, stale=is_stale))
+        else:
+            lines.append(
+                f"{start_index + i}. Ticket #{item['id'][:8]}… | "
+                f"{item.get('status', '').upper()} | "
+                f"Priority: {item.get('priority', '').upper()}\n"
+                f"   {item['title']}"
+            )
 
     state.clear_stale()
-    for order in items:
-        state.snapshot_order(order)
+
+    if resource == "orders":
+        for item in items:
+            state.snapshot_order(item)
+
     await set_state(state)
 
     nav_parts = []
     if state.has_previous:
         nav_parts.append(
-            f"← Type **previous** for orders {start_index - state.page_size}–{start_index - 1}"
+            f"← Type **previous** for {resource} "
+            f"{start_index - state.page_size}–{start_index - 1}"
         )
     if state.has_next:
-        end_next = min(
-            start_index + state.page_size + state.page_size - 1, state.total_items
-        )
+        end_next = min(start_index + state.page_size * 2 - 1, state.total_items)
         nav_parts.append(
-            f"→ Type **next** for orders {start_index + state.page_size}–{end_next}"
+            f"→ Type **next** for {resource} {start_index + state.page_size}–{end_next}"
         )
 
     boundary_msgs = []
     if not state.has_previous:
-        boundary_msgs.append(" This is the first page — no earlier orders.")
+        boundary_msgs.append(f"This is the first page — no earlier {resource}.")
     if not state.has_next:
-        boundary_msgs.append(" This is the last page — no more orders.")
+        boundary_msgs.append(f"This is the last page — no more {resource}.")
 
     return {
         "success": True,
         "page": state.current_page,
         "total_pages": state.total_pages,
         "total_items": state.total_items,
-        "showing": f"Orders {start_index}–{start_index + len(items) - 1} of {state.total_items}",
-        "orders": items,
+        "showing": f"{resource.capitalize()} {start_index}–{start_index + len(items) - 1} of {state.total_items}",
+        resource: items,
         "formatted_lines": lines,
         "navigation_hints": nav_parts,
         "boundary_messages": boundary_msgs,
@@ -563,7 +589,7 @@ async def list_orders(
         )
         await set_state(state)
 
-        result = await _build_page_response(state)
+        result = await _build_page_response(state, "orders")
         result["message"] = (
             f"Found **{state.total_items} orders** from {period_label}. "
             f"Showing page 1 of {state.total_pages} ({PAGE_SIZE} per page)."
@@ -709,9 +735,6 @@ async def list_tickets(
 
     async with AsyncSessionLocal() as db:
         query = select(Ticket)
-        if auth_token:
-            query = query.where(Ticket.user_id == auth_token)
-
         if status_filter != "all":
             query = query.where(Ticket.status == status_filter)
 
@@ -742,35 +765,13 @@ async def list_tickets(
         current_page=1,
         page_size=PAGE_SIZE,
     )
-    set_state(state)
 
-    items = state.current_items
-    start_index = 1
-    lines = []
-    for i, t in enumerate(items):
-        lines.append(
-            f"{i + 1}. Ticket #{t['id'][:8]}… | {t['status'].upper()} | Priority: {t['priority'].upper()}\n"
-            f"   {t['title']}"
-        )
-
-    nav_parts = []
-    if state.has_next:
-        nav_parts.append(
-            f"→ Type **next** for tickets {start_index + PAGE_SIZE}–"
-            f"{min(start_index + PAGE_SIZE * 2 - 1, state.total_items)}"
-        )
-
-    return {
-        "success": True,
-        "page": 1,
-        "total_pages": state.total_pages,
-        "total_items": state.total_items,
-        "showing": f"Tickets 1–{len(items)} of {state.total_items}",
-        "tickets": items,
-        "formatted_lines": lines,
-        "navigation_hints": nav_parts,
-        "message": f"Found **{state.total_items} tickets**. Showing page 1 of {state.total_pages}.",
-    }
+    result = await _build_page_response(state, "tickets")
+    result["message"] = (
+        f"Found **{state.total_items} tickets**. "
+        f"Showing page 1 of {state.total_pages} ({PAGE_SIZE} per page)."
+    )
+    return result
 
 
 async def navigate_tickets(
@@ -778,7 +779,6 @@ async def navigate_tickets(
     page_number: int | None = None,
     context: dict | None = None,
 ) -> dict:
-
     conversation_id = (context or {}).get("conversation_id", "default")
     state = await get_state(conversation_id, "tickets")
 
@@ -797,47 +797,15 @@ async def navigate_tickets(
         "specific": NavigationIntent.SPECIFIC,
         "refresh": NavigationIntent.REFRESH,
     }
-
     intent = intent_map.get(direction, NavigationIntent.NEXT)
 
-    nav_result = apply_navigation(state, intent, page=page_number)
+    nav_result = await apply_navigation(state, intent, page=page_number)
 
-    items = state.current_items
-    start_index = (state.current_page - 1) * state.page_size + 1
-    lines = []
-    for i, t in enumerate(items):
-        lines.append(
-            f"{start_index + i}. Ticket #{t['id'][:8]}… | {t.get('status', '').upper()} | {t.get('priority', '').upper()}\n"
-            f"   {t['title']}"
-        )
-
-    nav_parts = []
-    if state.has_previous:
-        nav_parts.append("← Type **previous** for earlier tickets")
-
-    if state.has_next:
-        nav_parts.append("→ Type **next** for more tickets")
-
-    boundary_msgs = []
-    if not state.has_previous:
-        boundary_msgs.append("This is the first page of tickets.")
-    if not state.has_next:
-        boundary_msgs.append("This is the last page of tickets.")
-
-    result = {
-        "success": True,
-        "page": state.current_page,
-        "total_pages": state.total_pages,
-        "total_items": state.total_items,
-        "showing": f"Tickets {start_index}–{start_index + len(items) - 1} of {state.total_items}",
-        "tickets": items,
-        "formatted_lines": lines,
-        "navigation_hints": nav_parts,
-        "boundary_messages": boundary_msgs,
-    }
+    result = await _build_page_response(state, "tickets")
 
     if nav_result.get("warning"):
         result["warning"] = nav_result["warning"]
+        result["at_boundary"] = nav_result.get("at_boundary")
 
     return result
 
@@ -1172,6 +1140,34 @@ async def search_knowledge_base(query: str, context: dict | None = None) -> dict
     }
 
 
+async def get_ticket_details(ticket_id: str, context: dict | None = None) -> dict:
+    clean_ticket_id = ticket_id.strip().lstrip("#")
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Ticket).where(Ticket.id == clean_ticket_id))
+        ticket = result.scalar_one_or_none()
+
+    if not ticket:
+        return {
+            "success": False,
+            "message": f"Ticket {clean_ticket_id} not found.",
+            "ticket_id": clean_ticket_id,
+        }
+
+    return {
+        "success": True,
+        "ticket": {
+            "id": str(ticket.id),
+            "title": ticket.title,
+            "description": ticket.description,
+            "priority": ticket.priority.value,
+            "status": ticket.status,
+            "created_at": str(ticket.created_at),
+            "order_id": str(ticket.order_id) if ticket.order_id else None,
+        },
+    }
+
+
 TOOL_EXECUTOR = {
     "check_order_status": check_order_status,
     "cancel_order": cancel_order,
@@ -1186,4 +1182,5 @@ TOOL_EXECUTOR = {
     "create_ticket": create_ticket,
     "sentiment_detection": sentiment_detection,
     "summarise_orders": summarise_orders,
+    "get_ticket_details": get_ticket_details,
 }

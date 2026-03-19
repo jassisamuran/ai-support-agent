@@ -44,6 +44,7 @@ from app.core.pagination_cache import (
     get_state,
     parse_navigation_intent,
 )
+from app.core.redis_client import redis
 from app.core.semantic_cache import cache_response, get_cached_response
 from app.core.tools import (
     TOOL_DEFINITIONS,
@@ -112,6 +113,8 @@ Order rules:
 Ticket rules:
 - If the user asks to show, list, or view tickets, use list_tickets.
 - If the user asks for next, previous, refresh, first, last, or a page number for tickets, use navigate_tickets.
+- If the user asks about one specific ticket or provides a ticket ID, use get_ticket_details.
+- Do not use check_order_status for ticket IDs. 
 
 Policy rules:
 - Always call search_knowledge_base before answering policy or FAQ questions.
@@ -138,6 +141,74 @@ _DATA_QUERY_KEYWORDS = {
     "hello",
     "hey",
 }
+
+_GREETING_KEYWORDS = {
+    "hi",
+    "hello",
+    "hey",
+    "hii",
+    "helo",
+    "good morning",
+    "good afternoon",
+    "good evening",
+}
+
+
+def _is_greeting(message: str) -> bool:
+    msg = message.strip().lower()
+    return msg in _GREETING_KEYWORDS
+
+
+async def handle_greeting_fast_path(
+    message: str,
+    conversation_id: str,
+    company_name: str,
+    context: dict,
+):
+    if not _is_greeting(message):
+        return None
+
+    SESSION_TTL_SECONDS = 86400
+    key = f"chat:greeting_count:{conversation_id}"
+
+    current = await redis.get(key)
+    greeting_count = int(current) + 1 if current else 1
+
+    await redis.set(key, greeting_count, ex=SESSION_TTL_SECONDS)
+
+    print("greeting count", greeting_count)
+    if greeting_count == 1:
+        return {
+            "message": (
+                f"Hello! I'm your {company_name} AI assistant. "
+                f"I can help with orders, refunds, support tickets, and policy questions. "
+                f"How can I assist you today?"
+            ),
+            "ui": None,
+            "tool_calls": [],
+            "tokens_used": 0,
+            "cost_usd": 0.0,
+            "from_cache": True,
+        }
+
+    if greeting_count <= 3:
+        return {
+            "message": "Hi again! How can I help you today?",
+            "ui": None,
+            "tool_calls": [],
+            "tokens_used": 0,
+            "cost_usd": 0.0,
+            "from_cache": True,
+        }
+
+    return {
+        "message": "Hello! What can I help you with today?",
+        "ui": None,
+        "tool_calls": [],
+        "tokens_used": 0,
+        "cost_usd": 0.0,
+        "from_cache": True,
+    }
 
 
 def _is_data_query(message: str) -> bool:
@@ -207,12 +278,13 @@ async def handle_navigation_fast_path(
     }
     direction = direction_map[intent]
 
+    context["conversation_id"] = conversation_id
+
     if resource == "tickets":
         return await navigate_tickets(
             direction=direction, page_number=page_num, context=context
         )
 
-    context["conversation_id"] = conversation_id
     return await navigate_orders(
         direction=direction, page_number=page_num, context=context
     )
@@ -396,6 +468,16 @@ class EnterpriseAgent:
         context: dict | None = None,
     ) -> dict:
         context = context or {}
+
+        greeting_result = await handle_greeting_fast_path(
+            user_message,
+            conversation_id,
+            "Proshop",
+            context,
+        )
+        if greeting_result is not None:
+            return greeting_result
+
         nav_result = await handle_navigation_fast_path(
             user_message, conversation_id, context
         )

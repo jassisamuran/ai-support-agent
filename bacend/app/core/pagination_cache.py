@@ -4,14 +4,11 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Optional
 
-import redis.asyncio as aioredis
-from app.config import settings
+from app.core.redis_client import redis
 
 PAGE_SIZE = 5
 CACHE_TTL = 300
 ORDER_SNAP_TTL = 60
-
-redis = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
 
 
 class NavigationIntent(str, Enum):
