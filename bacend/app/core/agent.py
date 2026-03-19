@@ -44,6 +44,7 @@ from app.core.pagination_cache import (
     get_state,
     parse_navigation_intent,
 )
+from app.core.redis_client import redis
 from app.core.semantic_cache import cache_response, get_cached_response
 from app.core.tools import (
     TOOL_DEFINITIONS,
@@ -112,6 +113,8 @@ Order rules:
 Ticket rules:
 - If the user asks to show, list, or view tickets, use list_tickets.
 - If the user asks for next, previous, refresh, first, last, or a page number for tickets, use navigate_tickets.
+- If the user asks about one specific ticket or provides a ticket ID, use get_ticket_details.
+- Do not use check_order_status for ticket IDs. 
 
 Policy rules:
 - Always call search_knowledge_base before answering policy or FAQ questions.
@@ -165,9 +168,15 @@ async def handle_greeting_fast_path(
     if not _is_greeting(message):
         return None
 
-    greeting_count = context.get("greeting_count", 0) + 1
-    context["greeting_count"] = greeting_count
+    SESSION_TTL_SECONDS = 86400
+    key = f"chat:greeting_count:{conversation_id}"
 
+    current = await redis.get(key)
+    greeting_count = int(current) + 1 if current else 1
+
+    await redis.set(key, greeting_count, ex=SESSION_TTL_SECONDS)
+
+    print("greeting count", greeting_count)
     if greeting_count == 1:
         return {
             "message": (

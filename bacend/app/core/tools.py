@@ -370,6 +370,20 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_ticket_details",
+            "description": "Get details for one support ticket by ticket ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticket_id": {"type": "string", "description": "The ticket ID"}
+                },
+                "required": ["ticket_id"],
+            },
+        },
+    },
 ]
 
 PERIOD_DAYS = {
@@ -723,7 +737,9 @@ async def list_tickets(
         query = select(Ticket)
         if status_filter != "all":
             query = query.where(Ticket.status == status_filter)
+
         query = query.order_by(Ticket.created_at.desc()).limit(limit)
+
         results = await db.execute(query)
         tickets = results.scalars().all()
 
@@ -1124,6 +1140,34 @@ async def search_knowledge_base(query: str, context: dict | None = None) -> dict
     }
 
 
+async def get_ticket_details(ticket_id: str, context: dict | None = None) -> dict:
+    clean_ticket_id = ticket_id.strip().lstrip("#")
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Ticket).where(Ticket.id == clean_ticket_id))
+        ticket = result.scalar_one_or_none()
+
+    if not ticket:
+        return {
+            "success": False,
+            "message": f"Ticket {clean_ticket_id} not found.",
+            "ticket_id": clean_ticket_id,
+        }
+
+    return {
+        "success": True,
+        "ticket": {
+            "id": str(ticket.id),
+            "title": ticket.title,
+            "description": ticket.description,
+            "priority": ticket.priority.value,
+            "status": ticket.status,
+            "created_at": str(ticket.created_at),
+            "order_id": str(ticket.order_id) if ticket.order_id else None,
+        },
+    }
+
+
 TOOL_EXECUTOR = {
     "check_order_status": check_order_status,
     "cancel_order": cancel_order,
@@ -1138,4 +1182,5 @@ TOOL_EXECUTOR = {
     "create_ticket": create_ticket,
     "sentiment_detection": sentiment_detection,
     "summarise_orders": summarise_orders,
+    "get_ticket_details": get_ticket_details,
 }

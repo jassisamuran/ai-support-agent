@@ -202,7 +202,9 @@ async def send_message(
         conversation_id=str(conversation.id),
         org=org,
         db=db,
-        context={"auth_token": user_token},
+        context={
+            "auth_token": user_token,
+        },
     )
 
     agent_message: str = result["message"]
