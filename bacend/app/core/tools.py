@@ -40,6 +40,35 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "compare_backend_items",
+            "description": (
+                "Fetch selected backend items or orders by their IDs and return "
+                "normalized comparison-ready data. "
+                "Use when the user asks to compare selected items, selected orders, "
+                "or backend items. "
+                "This tool does not invent comparison results — it only fetches and "
+                "prepares trusted backend data for comparison."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ids": {
+                        "type": "array",
+                        "description": (
+                            "Array of selected item or order IDs to compare. "
+                            "At least 2 IDs are required for meaningful comparison."
+                        ),
+                        "items": {"type": "string"},
+                        "minimum": 2,
+                    }
+                },
+                "required": ["ids"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "summarise_orders",
             "description": (
                 "Return a summary of customer orders for a time range. "
@@ -737,9 +766,7 @@ async def list_tickets(
         query = select(Ticket)
         if status_filter != "all":
             query = query.where(Ticket.status == status_filter)
-
         query = query.order_by(Ticket.created_at.desc()).limit(limit)
-
         results = await db.execute(query)
         tickets = results.scalars().all()
 
@@ -1168,6 +1195,59 @@ async def get_ticket_details(ticket_id: str, context: dict | None = None) -> dic
     }
 
 
+async def compare_backend_items(
+    ids: list[str],
+    context: dict | None = None,
+) -> dict:
+    if not ids or len(ids) < 2:
+        return {
+            "success": False,
+            "error": "At least 2 item IDs are required for comparison.",
+            "items": [],
+        }
+
+    token = (context or {}).get("auth_token")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{settings.BACKEND_API}/api/products/getProductByIds",
+                json={"ids": ids},
+                headers={"Authorization": f"Bearer {token}"} if token else {},
+            )
+        if response.status_code != 200:
+            return {
+                "success": False,
+                "error": f"Failed to fetch comparison items: {response.status_code}",
+                "items": [],
+            }
+
+        data = response.json()
+        raw_items = data.get("items", data) if isinstance(data, dict) else data
+
+        if not raw_items:
+            return {
+                "success": False,
+                "error": "No valid items found for the provided IDs.",
+                "items": [],
+            }
+
+        return {
+            "success": True,
+            "count": data.get("count", 0),
+            "products": data.get("products", []),
+        }
+
+    except httpx.TimeoutException:
+        return {
+            "success": False,
+            "error": "Comparison request timed out. Please try again.",
+            "items": [],
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e), "items": []}
+
+
 TOOL_EXECUTOR = {
     "check_order_status": check_order_status,
     "cancel_order": cancel_order,
@@ -1183,4 +1263,5 @@ TOOL_EXECUTOR = {
     "sentiment_detection": sentiment_detection,
     "summarise_orders": summarise_orders,
     "get_ticket_details": get_ticket_details,
+    "compare_backend_items": compare_backend_items,
 }
