@@ -42,6 +42,7 @@ class ChatRequest(BaseModel):
     stream: Optional[bool] = False
     action_type: Optional[str] = "chat"
     target_message_id: Optional[UUID] = None
+    selected_ids: list[str] | None = None
 
 
 class PaginationInfo(BaseModel):
@@ -185,6 +186,11 @@ async def send_message(
     )
 
     past_messages = list(reversed(db_result.scalars().all()))
+    user_message = request.message
+
+    if request.selected_ids:
+        ids_str = ", ".join(request.selected_ids)
+        user_message = f"{request.message} [Selected item IDs: {ids_str}]"
 
     history = [
         {"role": msg.role.value, "content": msg.content}
@@ -195,8 +201,9 @@ async def send_message(
         return await _stream_response(
             request, conversation, history, current_user, org, db
         )
+    print("user messag", request.message, request.selected_ids)
     result = await enterprise_agent.run(
-        user_message=request.message,
+        user_message=user_message,
         conversation_history=history,
         user_id=str(current_user.id),
         conversation_id=str(conversation.id),
