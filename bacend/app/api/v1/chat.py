@@ -1,7 +1,7 @@
 import asyncio
 import json
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 from uuid import UUID
 
 from app.core.agent import enterprise_agent
@@ -71,6 +71,27 @@ class UIBlock(BaseModel):
     pagination: PaginationInfo
 
 
+class RankedProduct(BaseModel):
+    rank: int
+    id: str
+    name: str
+    price: float
+    rating: float
+    stock: int
+    why: str
+
+
+class ComparisonUI(BaseModel):
+    type: Literal["comparison"]
+    query_type: Literal["comparison", "unsupported", "needs_preference"]
+    supported: bool
+    answer: Optional[str] = None
+    reason: Optional[str] = None
+    follow_up_question: Optional[str] = None
+    warning: Optional[str] = None
+    ranked_products: Optional[List[RankedProduct]] = None
+
+
 class ChatResponse(BaseModel):
     """
     Unified response shape returned by POST /message.
@@ -93,7 +114,7 @@ class ChatResponse(BaseModel):
     conversation_id: str
     message_id: str
     message: str
-    ui: Optional[UIBlock] = None  # ← the key addition
+    ui: Optional[UIBlock | ComparisonUI] = None
     tool_calls_made: List[str] = []
     tokens_used: int
     cost_usd: float
@@ -192,15 +213,30 @@ async def send_message(
         ids_str = ", ".join(request.selected_ids)
         user_message = f"{request.message} [Selected item IDs: {ids_str}]"
 
-    history = [
-        {"role": msg.role.value, "content": msg.content}
-        for msg in past_messages
-        if msg.role in (MessageRole.USER, MessageRole.ASSISTANT)
-    ]
-    if request.stream:
-        return await _stream_response(
-            request, conversation, history, current_user, org, db
-        )
+    history = []
+    for msg in past_messages:
+        if msg.role not in (MessageRole.USER, MessageRole.ASSISTANT):
+            continue
+
+        content = msg.content
+
+        if msg.role == MessageRole.ASSISTANT and msg.message_metadata:
+            ui = msg.message_metadata.get("ui")
+            if ui and ui.get("type") == "comparison":
+                ranked = ui.get("ranked_products") or []
+                if ranked:
+                    products_context = json.dumps(ranked, indent=2)
+                    content = (
+                        f"{content}\n\n"
+                        f"[Previously compared products — use this data to answer follow-up questions]:\n"
+                        f"{products_context}"
+                    )
+        print("which is have to know ", content)
+        history.append({"role": msg.role.value, "content": content})
+        if request.stream:
+            return await _stream_response(
+                request, conversation, history, current_user, org, db
+            )
     print("user messag", request.message, request.selected_ids)
     result = await enterprise_agent.run(
         user_message=user_message,
@@ -255,13 +291,33 @@ async def send_message(
     db.add(assistant_message)
     await db.commit()
 
-    ui_block: Optional[UIBlock] = None
+    ui_block: Optional[UIBlock | ComparisonUI] = None
+    agent_ui: Optional[dict] = result.get("ui")
+    print("agent ai", agent_ui)
+
     if agent_ui:
-        ui_block = UIBlock(
-            type=agent_ui["type"],
-            data=agent_ui.get("data", []),
-            pagination=PaginationInfo(**agent_ui["pagination"]),
-        )
+        ui_type = agent_ui.get("type")
+
+        if ui_type == "comparison":
+            ui_block = ComparisonUI(
+                type="comparison",
+                query_type=agent_ui.get("query_type", "comparison"),
+                supported=agent_ui.get("supported", True),
+                answer=agent_ui.get("answer"),
+                reason=agent_ui.get("reason"),
+                follow_up_question=agent_ui.get("follow_up_question"),
+                warning=agent_ui.get("warning"),
+                ranked_products=[
+                    RankedProduct(**p) for p in (agent_ui.get("ranked_products") or [])
+                ],
+            )
+        else:
+            ui_block = UIBlock(
+                type=agent_ui["type"],
+                data=agent_ui.get("data", []),
+                pagination=PaginationInfo(**agent_ui["pagination"]),
+            )
+
     return ChatResponse(
         conversation_id=str(conversation.id),
         message_id=str(assistant_message.id),

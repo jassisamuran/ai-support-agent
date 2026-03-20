@@ -15,13 +15,13 @@ STEP 10 → return to user                        — page 1 displayed
 
 THEN when user types "next":
 STEP A  → handle_navigation_fast_path()         — detected as NEXT intent
-STEP B  → navigate_orders()                      — reads from pagination cache, NO API call
+STEP B  → navigate_orders()                     — reads from pagination cache, NO API call
 STEP C  → returns page 2 (orders 6-10)          — zero LLM calls, zero API calls
 
 UNIFIED RESPONSE SHAPE (all paths):
 {
     "message": "Found 50 orders. Showing page 1.",   # always present
-    "ui": {                                           # present only for orders/tickets
+    "ui": {                                           # present only for orders/tickets/comparison
         "type": "orders",
         "data": [...],
         "pagination": {"page": 1, "next": True, "previous": False}
@@ -61,6 +61,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger()
+
 DEFAULT_SYSTEM_PROMPT = """
 You are a professional AI customer support assistant for {company_name}, an e-commerce platform.
 
@@ -110,6 +111,41 @@ Order rules:
 - If the user asks for next, previous, refresh, first, last, or a page number for orders, use navigate_orders.
 - If the user asks about one specific order, use check_order_status.
 
+Comparison output format (CRITICAL):
+After compare_backend_items returns results, you MUST reply with ONLY this JSON.
+No markdown, no prose before or after it — raw JSON only:
+
+{
+  "summary": "one sentence plain English answer for the chat bubble",
+  "query_type": "comparison",
+  "supported": true,
+  "answer": "name of the best product or null",
+  "reason": "one line why it is best or null",
+  "follow_up_question": null,
+  "warning": null,
+  "ranked_products": [
+    {
+      "rank": 1,
+      "id": "product_id_from_tool_result",
+      "name": "Product Name",
+      "price": 99.99,
+      "rating": 4.5,
+      "stock": 10,
+      "why": "one line reason for this rank"
+    }
+  ]
+}
+
+Rules for the JSON:
+- query_type must be exactly one of: "comparison", "unsupported", "needs_preference"
+- If the user asks about sales, profit, demand, or trending (data not in backend results):
+    set query_type="unsupported", supported=false, warning="Sales data not available", ranked_products=null
+- If you cannot answer without knowing the user's use-case (gaming, music, gift):
+    set query_type="needs_preference", follow_up_question="What will you use this for?", ranked_products=null
+- Never invent fields not present in the tool result (do not guess stock, rating, or price)
+- ranked_products must use IDs from the tool result only
+- summary is the only field shown in the chat bubble — keep it under 20 words
+
 Comparison rules:
 - If the user asks to compare products, selected orders, or backend items, use compare_backend_items.
 - compare_backend_items must receive the selected item or order IDs as an array.
@@ -125,7 +161,7 @@ Ticket rules:
 - If the user asks to show, list, or view tickets, use list_tickets.
 - If the user asks for next, previous, refresh, first, last, or a page number for tickets, use navigate_tickets.
 - If the user asks about one specific ticket or provides a ticket ID, use get_ticket_details.
-- Do not use check_order_status for ticket IDs. 
+- Do not use check_order_status for ticket IDs.
 
 Policy rules:
 - Always call search_knowledge_base before answering policy or FAQ questions.
@@ -190,7 +226,6 @@ async def handle_greeting_fast_path(
 
     await redis.set(key, greeting_count, ex=SESSION_TTL_SECONDS)
 
-    print("greeting count", greeting_count)
     if greeting_count == 1:
         return {
             "message": (
@@ -229,13 +264,8 @@ def _is_data_query(message: str) -> bool:
     """
     Returns True if the message is asking for user-specific data.
 
-    WHY THIS EXISTS:
-    Semantic cache is great for static answers: "what is your return policy?"
-    It is DANGEROUS for personal data: "show my orders last 5 months"
-    because the cached reply would contain another user's orders.
-
     Safe to cache:   policy questions, FAQ, shipping info, warranty
-    Never cache:     anything with orders, tickets, refunds, account data
+    Never cache:     anything with orders, tickets, refunds, account data, comparison
     """
     msg_lower = message.lower()
     return any(keyword in msg_lower for keyword in _DATA_QUERY_KEYWORDS)
@@ -245,7 +275,6 @@ async def _detect_context_resource(conversation_id: str) -> str:
     """
     Determine if the user is currently browsing orders or tickets
     by checking which was fetched most recently.
-    Used by the navigation fast path to route "next"/"prev" correctly.
     """
     orders_state = await get_state(conversation_id, "orders")
     tickets_state = await get_state(conversation_id, "tickets")
@@ -268,13 +297,7 @@ async def handle_navigation_fast_path(
 ):
     """
     STEP 1 in the flow.
-
-    Checks if the message is purely a navigation command.
-    If yes: handles it entirely without calling the LLM.
-    If no:  returns None so the main loop continues.
-
-    For "show my orders for last 5 months" → returns None (not navigation).
-    For "next" after orders are loaded     → returns page 2 from pagination cache.
+    Returns None for non-navigation messages so the main loop continues.
     """
     intent, page_num = parse_navigation_intent(message)
     if intent is None:
@@ -291,7 +314,6 @@ async def handle_navigation_fast_path(
         NavigationIntent.REFRESH: "refresh",
     }
     direction = direction_map[intent]
-
     context["conversation_id"] = conversation_id
 
     if resource == "tickets":
@@ -305,10 +327,6 @@ async def handle_navigation_fast_path(
 
 
 def format_navigation_response(result: dict, resource: str = "orders") -> str:
-    """
-    Convert the raw pagination result dict into a clean chat message string.
-    Used only for fast-path navigation responses.
-    """
     if not result.get("success", True):
         return result.get("message", "Something went wrong.")
 
@@ -350,18 +368,9 @@ def format_navigation_response(result: dict, resource: str = "orders") -> str:
 
 
 def _build_ui_block(raw_result: dict, resource: str) -> dict:
-    """
-    Build the standard ui block that every paginated response carries.
-
-    Args:
-        raw_result: the dict returned by list_orders / navigate_orders /
-                    list_tickets / navigate_tickets
-        resource:   "orders" or "tickets"
-    """
-    data_key = resource
     return {
         "type": resource,
-        "data": raw_result.get(data_key, []),
+        "data": raw_result.get(resource, []),
         "pagination": {
             "page": raw_result.get("page", 1),
             "total_pages": raw_result.get("total_pages", 1),
@@ -374,11 +383,6 @@ def _build_ui_block(raw_result: dict, resource: str) -> dict:
 
 
 async def _get_for_org(org: Organization, db: AsyncSession) -> str:
-    """
-    Load the correct system prompt for this org.
-    Supports A/B testing via traffic_percent weights on PromptVersion rows.
-    Falls back to org.system_prompt, then DEFAULT_SYSTEM_PROMPT.
-    """
     if org.active_prompt_id:
         result = await db.execute(
             select(PromptVersion).where(
@@ -401,7 +405,7 @@ async def _get_for_org(org: Organization, db: AsyncSession) -> str:
 
     if org.system_prompt:
         return org.system_prompt.replace("{company_name}", org.company_name)
-    return DEFAULT_SYSTEM_PROMPT.format(company_name=org.company_name)
+    return DEFAULT_SYSTEM_PROMPT.replace("{company_name}", org.company_name)
 
 
 def _paginated_response(
@@ -413,23 +417,6 @@ def _paginated_response(
     cost_usd: float,
     from_cache: bool = False,
 ) -> dict:
-    """
-    Return the unified response dict for any paginated resource (orders / tickets).
-
-    Shape:
-    {
-        "message": "...",
-        "ui": {
-            "type": "orders",
-            "data": [...],
-            "pagination": {"page": 1, "next": True, "previous": False, ...}
-        },
-        "tool_calls": [...],
-        "tokens_used": N,
-        "cost_usd": 0.0,
-        "from_cache": False,
-    }
-    """
     return {
         "message": raw_result.get("message", f"Here are your {resource}."),
         "ui": _build_ui_block(raw_result, resource),
@@ -437,6 +424,52 @@ def _paginated_response(
         "tokens_used": prompt_tokens + completion_tokens,
         "cost_usd": cost_usd,
         "from_cache": from_cache,
+    }
+
+
+def _comparison_response(
+    parsed: dict,
+    tool_calls_log: list,
+    prompt_tokens: int,
+    completion_tokens: int,
+    cost_usd: float,
+) -> dict:
+    """
+    Return the unified response dict for a comparison result.
+    The LLM has replied with structured JSON after compare_backend_items.
+
+    Shape:
+    {
+        "message": "Sony PS4 is the best overall.",
+        "ui": {
+            "type": "comparison",
+            "query_type": "comparison",
+            "supported": true,
+            "answer": "Sony Playstation 4 Pro",
+            "reason": "Highest rating 5.0 with good stock",
+            "follow_up_question": null,
+            "warning": null,
+            "ranked_products": [...]
+        },
+        ...
+    }
+    """
+    return {
+        "message": parsed.get("summary", "Here is the comparison."),
+        "ui": {
+            "type": "comparison",
+            "query_type": parsed.get("query_type", "comparison"),
+            "supported": parsed.get("supported", True),
+            "answer": parsed.get("answer"),
+            "reason": parsed.get("reason"),
+            "follow_up_question": parsed.get("follow_up_question"),
+            "warning": parsed.get("warning"),
+            "ranked_products": parsed.get("ranked_products"),
+        },
+        "tool_calls": tool_calls_log,
+        "tokens_used": prompt_tokens + completion_tokens,
+        "cost_usd": cost_usd,
+        "from_cache": False,
     }
 
 
@@ -449,16 +482,6 @@ def _text_response(
     from_cache: bool = False,
     used_fallback=None,
 ) -> dict:
-    """
-    Return the unified response dict for plain-text (non-paginated) answers.
-
-    Shape:
-    {
-        "message": "...",
-        "ui": None,
-        ...
-    }
-    """
     return {
         "message": text,
         "ui": None,
@@ -468,6 +491,46 @@ def _text_response(
         "from_cache": from_cache,
         "used_fallback": used_fallback,
     }
+
+
+def _try_parse_comparison(text: str) -> dict | None:
+    """
+    Safely attempt to parse a comparison JSON reply from the LLM.
+
+    The LLM is instructed to reply with raw JSON after compare_backend_items.
+    Sometimes it wraps the JSON in markdown fences (```json ... ```) — strip those.
+    Returns the parsed dict if it looks like a comparison reply, else None.
+
+    This is intentionally defensive:
+    - Non-JSON replies (normal chat) return None without raising
+    - JSON that lacks query_type returns None (not a comparison reply)
+    """
+    try:
+        clean = text.strip()
+
+        # Strip markdown code fences if LLM added them
+        if clean.startswith("```"):
+            # "```json\n{...}\n```"  →  "{...}"
+            parts = clean.split("```")
+            # parts[1] is the content between the first pair of fences
+            if len(parts) >= 2:
+                clean = parts[1]
+                # Remove language tag (e.g. "json\n")
+                if clean.startswith("json"):
+                    clean = clean[4:]
+            clean = clean.strip()
+
+        parsed = json.loads(clean)
+
+        # Only treat it as a comparison response if query_type is present
+        if "query_type" not in parsed:
+            return None
+
+        return parsed
+
+    except (json.JSONDecodeError, ValueError, IndexError):
+        # Normal text reply — not JSON, that is fine
+        return None
 
 
 class EnterpriseAgent:
@@ -534,6 +597,7 @@ class EnterpriseAgent:
         total_cost = 0.0
         used_fallback = None
         _produced_paginated_result = False
+        _produced_comparison_result = False
 
         max_iterations = 5
         for iteration in range(max_iterations):
@@ -558,11 +622,39 @@ class EnterpriseAgent:
             )
 
             if finish_reason == "stop":
-                final_response = message.content
+                final_text = message.content
+                if _produced_comparison_result:
+                    parsed = _try_parse_comparison(final_text)
+                    if parsed is not None:
+                        logger.debug(
+                            "comparison result parsed",
+                            query_type=parsed.get("query_type"),
+                        )
+                        asyncio.create_task(
+                            record_usage(
+                                org_id=str(org.id),
+                                model=llm_result["model"],
+                                prompt_tokens=total_prompt_tokens,
+                                completion_tokens=total_completion_tokens,
+                                cost_usd=total_cost,
+                                conversation_id=conversation_id,
+                            )
+                        )
+                        return _comparison_response(
+                            parsed=parsed,
+                            tool_calls_log=tool_calls_log,
+                            prompt_tokens=total_prompt_tokens,
+                            completion_tokens=total_completion_tokens,
+                            cost_usd=total_cost,
+                        )
+                    logger.warning(
+                        "comparison JSON parse failed, falling back to text",
+                        response=final_text[:200],
+                    )
 
                 if not _is_data_query(user_message) and not _produced_paginated_result:
                     asyncio.create_task(
-                        cache_response(user_message, final_response, str(org.id))
+                        cache_response(user_message, final_text, str(org.id))
                     )
 
                 asyncio.create_task(
@@ -577,7 +669,7 @@ class EnterpriseAgent:
                 )
 
                 return _text_response(
-                    text=final_response,
+                    text=final_text,
                     tool_calls_log=tool_calls_log,
                     prompt_tokens=total_prompt_tokens,
                     completion_tokens=total_completion_tokens,
@@ -617,8 +709,11 @@ class EnterpriseAgent:
                     ):
                         _produced_paginated_result = True
 
+                    if name == "compare_backend_items":
+                        _produced_comparison_result = True
+
                     try:
-                        if name in ("create_ticket",):
+                        if name == "create_ticket":
                             raw_result = await TOOL_EXECUTOR[name](
                                 **args,
                                 user_id=user_id,
@@ -692,14 +787,11 @@ class EnterpriseAgent:
                         tool_result = json.dumps(raw_result)
 
                     except Exception as e:
+                        logger.error("tool execution error", tool=name, error=str(e))
                         tool_result = json.dumps({"error": str(e)})
 
                     tool_calls_log.append(
-                        {
-                            "name": name,
-                            "args": args,
-                            "result": tool_result[:500],
-                        }
+                        {"name": name, "args": args, "result": tool_result[:500]}
                     )
 
                     messages.append(
