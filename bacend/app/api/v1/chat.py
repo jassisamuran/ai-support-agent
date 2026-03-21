@@ -29,6 +29,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
+import time
+
+from app.core.logger import Timer, log
 
 
 class ConversationRequest(BaseModel):
@@ -154,6 +157,9 @@ async def send_message(
     current_user: User = Depends(get_current_user),
     org: Organization = Depends(get_current_org),
 ):
+    request_start = time.perf_counter()
+    req_log = log.bind(conversation_id=request.conversation_id, org_id=str(org.id))
+    req_log.info("request_start", message="message_api")
     # await check_rate_limit(str(current_user.id))
     user_token = http_request.headers.get("Authorization")
 
@@ -231,13 +237,14 @@ async def send_message(
                         f"[Previously compared products — use this data to answer follow-up questions]:\n"
                         f"{products_context}"
                     )
-        print("which is have to know ", content)
         history.append({"role": msg.role.value, "content": content})
         if request.stream:
             return await _stream_response(
                 request, conversation, history, current_user, org, db
             )
-    print("user messag", request.message, request.selected_ids)
+    time_agent = time.perf_counter()
+    req_log.info("calling_agent", path="agent", duration_ms=time_agent)
+
     result = await enterprise_agent.run(
         user_message=user_message,
         conversation_history=history,
@@ -245,9 +252,17 @@ async def send_message(
         conversation_id=str(conversation.id),
         org=org,
         db=db,
+        req_log=req_log,
         context={
             "auth_token": user_token,
         },
+    )
+
+    req_log.info(
+        "response_agent",
+        path="agent",
+        duration=time.perf_counter(),
+        total_ms=int((time.perf_counter() - time_agent) * 1000),
     )
 
     agent_message: str = result["message"]
@@ -317,7 +332,11 @@ async def send_message(
                 data=agent_ui.get("data", []),
                 pagination=PaginationInfo(**agent_ui["pagination"]),
             )
-
+    req_log.info(
+        "request_end",
+        message="message_api",
+        duration=(time.perf_counter() - request_start) * 1000,
+    )
     return ChatResponse(
         conversation_id=str(conversation.id),
         message_id=str(assistant_message.id),
