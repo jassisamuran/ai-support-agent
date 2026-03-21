@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 router = APIRouter()
 import time
 
-from app.core.logger import Timer, log
+from app.core.logger import log
 
 
 class ConversationRequest(BaseModel):

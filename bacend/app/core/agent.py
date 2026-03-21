@@ -40,7 +40,7 @@ import time
 
 import structlog
 from app.core.evaluator import evaluate_response
-from app.core.logger import Timer, log
+from app.core.logger import log
 from app.core.pagination_cache import (
     NavigationIntent,
     get_state,
