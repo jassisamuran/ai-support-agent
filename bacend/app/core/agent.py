@@ -36,9 +36,11 @@ UNIFIED RESPONSE SHAPE (all paths):
 import asyncio
 import json
 import random
+import time
 
 import structlog
 from app.core.evaluator import evaluate_response
+from app.core.logger import log
 from app.core.pagination_cache import (
     NavigationIntent,
     get_state,
@@ -61,7 +63,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = structlog.get_logger()
-
 DEFAULT_SYSTEM_PROMPT = """
 You are a professional AI customer support assistant for {company_name}, an e-commerce platform.
 
@@ -214,6 +215,7 @@ async def handle_greeting_fast_path(
     conversation_id: str,
     company_name: str,
     context: dict,
+    req_log=None,
 ):
     if not _is_greeting(message):
         return None
@@ -226,8 +228,15 @@ async def handle_greeting_fast_path(
 
     await redis.set(key, greeting_count, ex=SESSION_TTL_SECONDS)
 
+    log = (req_log or logger).bind(
+        path="greeting_fast_path",
+        conversation_id=conversation_id,
+        greeting_count=greeting_count,
+    )
+    log.info("req.greeting_fast_path")
+
     if greeting_count == 1:
-        return {
+        response = {
             "message": (
                 f"Hello! I'm your {company_name} AI assistant. "
                 f"I can help with orders, refunds, support tickets, and policy questions. "
@@ -239,9 +248,8 @@ async def handle_greeting_fast_path(
             "cost_usd": 0.0,
             "from_cache": True,
         }
-
-    if greeting_count <= 3:
-        return {
+    elif greeting_count <= 3:
+        response = {
             "message": "Hi again! How can I help you today?",
             "ui": None,
             "tool_calls": [],
@@ -249,15 +257,18 @@ async def handle_greeting_fast_path(
             "cost_usd": 0.0,
             "from_cache": True,
         }
+    else:
+        response = {
+            "message": "Hello! What can I help you with today?",
+            "ui": None,
+            "tool_calls": [],
+            "tokens_used": 0,
+            "cost_usd": 0.0,
+            "from_cache": True,
+        }
 
-    return {
-        "message": "Hello! What can I help you with today?",
-        "ui": None,
-        "tool_calls": [],
-        "tokens_used": 0,
-        "cost_usd": 0.0,
-        "from_cache": True,
-    }
+    log.info("req.greeting_fast_path.done", greeting_count=greeting_count)
+    return response
 
 
 def _is_data_query(message: str) -> bool:
@@ -294,6 +305,7 @@ async def handle_navigation_fast_path(
     message: str,
     conversation_id: str,
     context: dict,
+    req_log=None,
 ):
     """
     STEP 1 in the flow.
@@ -316,14 +328,33 @@ async def handle_navigation_fast_path(
     direction = direction_map[intent]
     context["conversation_id"] = conversation_id
 
+    log = (req_log or logger).bind(
+        path="navigation_fast_path",
+        conversation_id=conversation_id,
+        intent=intent.name,
+        direction=direction,
+        resource=resource,
+        page_num=page_num,
+    )
+    log.info("req.navigation_fast_path")
+
     if resource == "tickets":
-        return await navigate_tickets(
+        result = await navigate_tickets(
+            direction=direction, page_number=page_num, context=context
+        )
+    else:
+        result = await navigate_orders(
             direction=direction, page_number=page_num, context=context
         )
 
-    return await navigate_orders(
-        direction=direction, page_number=page_num, context=context
+    log.info(
+        "req.navigation_fast_path.done",
+        page=result.get("page"),
+        total_pages=result.get("total_pages"),
+        total_items=result.get("total_items"),
+        success=result.get("success", True),
     )
+    return result
 
 
 def format_navigation_response(result: dict, resource: str = "orders") -> str:
@@ -542,26 +573,53 @@ class EnterpriseAgent:
         conversation_id: str,
         org: Organization,
         db: AsyncSession,
+        req_log,
         context: dict | None = None,
     ) -> dict:
         context = context or {}
+        req_start = time.monotonic()
+
+        req_log = req_log.bind(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            org_id=str(org.id),
+            message_preview=user_message[:80],
+            message_len=len(user_message),
+            history_turns=len(conversation_history),
+        )
+        req_log.info("req.start")
 
         greeting_result = await handle_greeting_fast_path(
             user_message,
             conversation_id,
             "Proshop",
             context,
+            req_log=req_log,
         )
         if greeting_result is not None:
+            req_log.info(
+                "req.done",
+                path="greeting_fast_path",
+                from_cache=True,
+                duration_ms=round((time.monotonic() - req_start) * 1000, 2),
+            )
             return greeting_result
 
         nav_result = await handle_navigation_fast_path(
-            user_message, conversation_id, context
+            user_message, conversation_id, context, req_log=req_log
         )
 
         if nav_result is not None:
             resource = await _detect_context_resource(conversation_id)
-            logger.debug("navigation fast path", resource=resource, result=nav_result)
+            req_log.info(
+                "req.done",
+                path="navigation_fast_path",
+                resource=resource,
+                page=nav_result.get("page"),
+                total_pages=nav_result.get("total_pages"),
+                from_cache=True,
+                duration_ms=round((time.monotonic() - req_start) * 1000, 2),
+            )
             return _paginated_response(
                 raw_result=nav_result,
                 resource=resource,
@@ -572,9 +630,18 @@ class EnterpriseAgent:
                 from_cache=True,
             )
 
-        if not _is_data_query(user_message):
+        is_data = _is_data_query(user_message)
+        req_log.info("req.cache_check", is_data_query=is_data)
+
+        if not is_data:
             cached = await get_cached_response(user_message, str(org.id))
             if cached:
+                req_log.info(
+                    "req.done",
+                    path="semantic_cache_hit",
+                    from_cache=True,
+                    duration_ms=round((time.monotonic() - req_start) * 1000, 2),
+                )
                 return _text_response(
                     text=cached["response"],
                     tool_calls_log=[],
@@ -583,6 +650,7 @@ class EnterpriseAgent:
                     cost_usd=0.0,
                     from_cache=True,
                 )
+            req_log.info("req.cache_miss")
 
         system_prompt = await _get_for_org(org, db)
         messages = [
@@ -599,8 +667,17 @@ class EnterpriseAgent:
         _produced_paginated_result = False
         _produced_comparison_result = False
 
+        req_log.info(
+            "req.llm_loop_start",
+            tool_definitions_count=len(TOOL_DEFINITIONS),
+            max_iterations=5,
+        )
+
         max_iterations = 5
         for iteration in range(max_iterations):
+            iter_start = time.monotonic()
+            req_log.info("req.llm_call", iteration=iteration)
+
             llm_result = await llm_service.complete(
                 messages=messages,
                 tools=TOOL_DEFINITIONS,
@@ -617,8 +694,16 @@ class EnterpriseAgent:
             message = llm_result["message"]
             finish_reason = llm_result["finish_reason"]
 
-            logger.debug(
-                "llm iteration", iteration=iteration, finish_reason=finish_reason
+            req_log.info(
+                "req.llm_response",
+                iteration=iteration,
+                finish_reason=finish_reason,
+                model=llm_result.get("model"),
+                prompt_tokens=llm_result["prompt_tokens"],
+                completion_tokens=llm_result["completion_tokens"],
+                cost_usd=llm_result["cost_usd"],
+                used_fallback=used_fallback,
+                iter_duration_ms=round((time.monotonic() - iter_start) * 1000, 2),
             )
 
             if finish_reason == "stop":
@@ -626,9 +711,11 @@ class EnterpriseAgent:
                 if _produced_comparison_result:
                     parsed = _try_parse_comparison(final_text)
                     if parsed is not None:
-                        logger.debug(
-                            "comparison result parsed",
+                        req_log.info(
+                            "req.comparison_parsed",
                             query_type=parsed.get("query_type"),
+                            supported=parsed.get("supported"),
+                            answer=parsed.get("answer"),
                         )
                         asyncio.create_task(
                             record_usage(
@@ -640,6 +727,16 @@ class EnterpriseAgent:
                                 conversation_id=conversation_id,
                             )
                         )
+                        req_log.info(
+                            "req.done",
+                            path="comparison",
+                            total_prompt_tokens=total_prompt_tokens,
+                            total_completion_tokens=total_completion_tokens,
+                            total_cost_usd=total_cost,
+                            iterations=iteration + 1,
+                            tool_calls_count=len(tool_calls_log),
+                            duration_ms=round((time.monotonic() - req_start) * 1000, 2),
+                        )
                         return _comparison_response(
                             parsed=parsed,
                             tool_calls_log=tool_calls_log,
@@ -647,12 +744,14 @@ class EnterpriseAgent:
                             completion_tokens=total_completion_tokens,
                             cost_usd=total_cost,
                         )
-                    logger.warning(
-                        "comparison JSON parse failed, falling back to text",
-                        response=final_text[:200],
+
+                    req_log.warning(
+                        "req.comparison_parse_failed",
+                        response_preview=final_text[:200],
                     )
 
-                if not _is_data_query(user_message) and not _produced_paginated_result:
+                if not is_data and not _produced_paginated_result:
+                    req_log.info("req.cache_write", response_len=len(final_text))
                     asyncio.create_task(
                         cache_response(user_message, final_text, str(org.id))
                     )
@@ -668,6 +767,20 @@ class EnterpriseAgent:
                     )
                 )
 
+                req_log.info(
+                    "req.done",
+                    path="text_response",
+                    from_cache=False,
+                    total_prompt_tokens=total_prompt_tokens,
+                    total_completion_tokens=total_completion_tokens,
+                    total_cost_usd=total_cost,
+                    iterations=iteration + 1,
+                    tool_calls_count=len(tool_calls_log),
+                    used_fallback=used_fallback,
+                    response_len=len(final_text),
+                    duration_ms=round((time.monotonic() - req_start) * 1000, 2),
+                )
+
                 return _text_response(
                     text=final_text,
                     tool_calls_log=tool_calls_log,
@@ -679,6 +792,13 @@ class EnterpriseAgent:
                 )
 
             if finish_reason == "tool_calls" and message.tool_calls:
+                req_log.info(
+                    "req.tool_calls_requested",
+                    iteration=iteration,
+                    tools=[tc.function.name for tc in message.tool_calls],
+                    count=len(message.tool_calls),
+                )
+
                 messages.append(
                     {
                         "role": "assistant",
@@ -700,6 +820,14 @@ class EnterpriseAgent:
                 for tool_call in message.tool_calls:
                     name = tool_call.function.name
                     args = json.loads(tool_call.function.arguments)
+                    tool_start = time.monotonic()
+
+                    req_log.info(
+                        "req.tool_call.start",
+                        iteration=iteration,
+                        tool=name,
+                        args_preview={k: str(v)[:80] for k, v in args.items()},
+                    )
 
                     if name in (
                         "list_orders",
@@ -728,6 +856,20 @@ class EnterpriseAgent:
                         else:
                             raw_result = {"error": f"Tool '{name}' not available."}
 
+                        tool_duration_ms = round(
+                            (time.monotonic() - tool_start) * 1000, 2
+                        )
+                        req_log.info(
+                            "req.tool_call.done",
+                            iteration=iteration,
+                            tool=name,
+                            success=True,
+                            duration_ms=tool_duration_ms,
+                            result_keys=list(raw_result.keys())
+                            if isinstance(raw_result, dict)
+                            else None,
+                        )
+
                         if name in ("list_orders", "navigate_orders"):
                             asyncio.create_task(
                                 record_usage(
@@ -738,6 +880,22 @@ class EnterpriseAgent:
                                     cost_usd=total_cost,
                                     conversation_id=conversation_id,
                                 )
+                            )
+                            req_log.info(
+                                "req.done",
+                                path="orders_paginated",
+                                tool=name,
+                                page=raw_result.get("page"),
+                                total_pages=raw_result.get("total_pages"),
+                                total_items=raw_result.get("total_items"),
+                                from_cache=False,
+                                total_prompt_tokens=total_prompt_tokens,
+                                total_completion_tokens=total_completion_tokens,
+                                total_cost_usd=total_cost,
+                                iterations=iteration + 1,
+                                duration_ms=round(
+                                    (time.monotonic() - req_start) * 1000, 2
+                                ),
                             )
                             return _paginated_response(
                                 raw_result=raw_result,
@@ -767,6 +925,22 @@ class EnterpriseAgent:
                                     conversation_id=conversation_id,
                                 )
                             )
+                            req_log.info(
+                                "req.done",
+                                path="tickets_paginated",
+                                tool=name,
+                                page=raw_result.get("page"),
+                                total_pages=raw_result.get("total_pages"),
+                                total_items=raw_result.get("total_items"),
+                                from_cache=False,
+                                total_prompt_tokens=total_prompt_tokens,
+                                total_completion_tokens=total_completion_tokens,
+                                total_cost_usd=total_cost,
+                                iterations=iteration + 1,
+                                duration_ms=round(
+                                    (time.monotonic() - req_start) * 1000, 2
+                                ),
+                            )
                             return _paginated_response(
                                 raw_result=raw_result,
                                 resource="tickets",
@@ -787,7 +961,16 @@ class EnterpriseAgent:
                         tool_result = json.dumps(raw_result)
 
                     except Exception as e:
-                        logger.error("tool execution error", tool=name, error=str(e))
+                        tool_duration_ms = round(
+                            (time.monotonic() - tool_start) * 1000, 2
+                        )
+                        req_log.error(
+                            "req.tool_call.error",
+                            iteration=iteration,
+                            tool=name,
+                            error=str(e),
+                            duration_ms=tool_duration_ms,
+                        )
                         tool_result = json.dumps({"error": str(e)})
 
                     tool_calls_log.append(
@@ -801,6 +984,16 @@ class EnterpriseAgent:
                             "content": tool_result,
                         }
                     )
+
+        req_log.error(
+            "req.max_iterations_exceeded",
+            max_iterations=max_iterations,
+            total_prompt_tokens=total_prompt_tokens,
+            total_completion_tokens=total_completion_tokens,
+            total_cost_usd=total_cost,
+            tool_calls_count=len(tool_calls_log),
+            duration_ms=round((time.monotonic() - req_start) * 1000, 2),
+        )
 
         return _text_response(
             text="Something went wrong. Please try again.",
