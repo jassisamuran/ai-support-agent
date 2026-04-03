@@ -1,7 +1,5 @@
 # AI Support Agent Platform
 
-[![Ask DeepWiki](https://devin.ai/assets/askdeepwiki.png)](https://deepwiki.com/jassisamuran/ai-support-agent)
-
 This repository contains the backend for an enterprise-grade, multi-tenant AI support agent designed for e-commerce platforms. The agent can handle a wide range of customer queries, from checking order statuses and managing support tickets to answering policy questions using a knowledge base.
 
 It is built with a focus on performance, resilience, and extensibility, featuring sophisticated caching mechanisms, tool-based function calling, and a resilient architecture that can fall back to secondary services.
